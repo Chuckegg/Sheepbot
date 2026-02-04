@@ -1,0 +1,111 @@
+# Sensitive credentials and API keys
+API_KEY.txt
+API_KEY_TEMP.txt
+BOT_TOKEN.txt
+API_KEY S.txt
+
+# Database files
+*.db
+*.db-journal
+*.db.backup
+*.db.before*
+*.db.pre-*
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+.virtualenv/
+
+# Backup and temporary files
+backups/
+%TEMP%/
+*.backup
+
+# User data and snapshots (generated data)
+*_snapshots.json
+tracked_streaks.json
+tracked_users.txt
+more_users.txt
+users_to_add.txt
+default_users.json
+user_colors.json
+user_links.json
+guild_info.json
+stats.xlsx
+
+# API response files (test data)
+*_api_response.json
+
+# Temporary and utility scripts (not needed for bot operation)
+add_to_db.py
+backfill_uuids.py
+backup_hourly.py
+batch_update.py
+change_ws.py
+check_username_status.py
+convert_colors.py
+convert_to_db.py
+export_kimmiii20_snapshots.py
+extract_usernames.py
+fetch_layout_data.py
+filter_usernames.py
+fix_duplicate_usernames.py
+fix_guilds.py
+fix_kimmiii20.py
+import_kimmiii20_snapshots.py
+inspect_api_raw.py
+manual_rename_kimmiii20.py
+migrate_add_weekly.py
+migrate_all_to_db.py
+migrate_kimmiii20.py
+migrate_stats_db.py
+migrate_username_change.py
+populate_ctw_ww_snapshots.py
+rotate_yesterday.py
+set_snapshots_kimmiii20.py
+smart_uuid_backfill.py
+test_layout_retrieval.py
+test_uuid_tracking.py
+transfer_stats.py
+verify_uuid_schema.py
+
+# Generated layouts and formatted data
+layouts_formatted.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
