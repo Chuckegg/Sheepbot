@@ -757,7 +757,8 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
     if guild_name and guild_tag:
         print(f"[DEBUG] Player is in guild '{guild_name}', fetching guild exp stats...")
         try:
-            guild_result = api_update_guild_database(guild_name, api_key)
+            # Pass snapshot_sections so guild gets the same snapshots as the player
+            guild_result = api_update_guild_database(guild_name, api_key, snapshot_sections)
             if 'error' not in guild_result:
                 print(f"[DEBUG] Successfully auto-registered guild '{guild_name}' with tag [{guild_tag}]")
             else:
