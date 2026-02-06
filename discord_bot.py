@@ -44,6 +44,7 @@ from db_helper import (
     add_tracked_guild,
     remove_tracked_guild,
     is_tracked_guild,
+    is_registered_guild,
     get_tracked_guilds,
     get_guilds_for_periodic_updates,
     guild_has_tracked_members,
@@ -10056,6 +10057,154 @@ def _calculate_metric_value(stats_dict: dict, metric: str, period: str, is_ratio
         return 0.0
 
 
+def _calculate_guild_rankings(guild_name: str):
+    """Calculate rankings for a specific guild across all game types.
+    
+    Returns:
+        dict: {
+            period: {
+                game_type: (rank, total_guilds, exp_value)
+            }
+        }
+    """
+    periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
+    
+    # Initialize result structure
+    result = {period: {} for period in periods}
+    guild_is_tracked = is_tracked_guild(guild_name)
+    
+    try:
+        print(f"[GUILD RANKINGS] Loading all guilds...")
+        start_time = time.time()
+        
+        # Get all guilds
+        all_guild_names = get_all_guilds()
+        
+        # Load all guild data
+        all_guilds_data = {}
+        for gname in all_guild_names:
+            try:
+                exp_dict = get_guild_exp(gname)
+                if not exp_dict:
+                    continue
+                
+                # Get tracking status
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT is_tracked FROM tracked_guilds WHERE name = ?', (gname,))
+                    row = cursor.fetchone()
+                    g_is_tracked = row['is_tracked'] == 1 if row else False
+                
+                all_guilds_data[gname] = {
+                    'exp': exp_dict,
+                    'is_tracked': g_is_tracked
+                }
+            except Exception as e:
+                print(f"[GUILD RANKINGS] Error loading guild {gname}: {e}")
+                continue
+        
+        print(f"[GUILD RANKINGS] Loaded {len(all_guilds_data)} guilds in {time.time() - start_time:.2f}s")
+        
+        # Get the target guild's data
+        guild_data = all_guilds_data.get(guild_name)
+        if not guild_data:
+            print(f"[GUILD RANKINGS] Guild '{guild_name}' not found in database")
+            return None
+        
+        guild_exp = guild_data['exp']
+        
+        # Get all game types from the guild's exp data (dynamically)
+        game_types = list(guild_exp.keys())
+        print(f"[GUILD RANKINGS] Found {len(game_types)} game types for guild {guild_name}: {game_types}")
+        
+        # For each game type, calculate leaderboard and find guild's position
+        for game_type in game_types:
+            try:
+                # Calculate leaderboard for each period
+                for period in periods:
+                    # Skip non-lifetime periods if guild is not tracked
+                    if period != "lifetime" and not guild_is_tracked:
+                        continue
+                    
+                    # Get guild's value first
+                    if period == "lifetime":
+                        guild_value = guild_exp[game_type]['lifetime']
+                    elif period == "session":
+                        guild_value = guild_exp[game_type]['lifetime'] - guild_exp[game_type]['session']
+                    elif period == "daily":
+                        guild_value = guild_exp[game_type]['lifetime'] - guild_exp[game_type]['daily']
+                    elif period == "yesterday":
+                        guild_value = guild_exp[game_type]['daily'] - guild_exp[game_type]['yesterday']
+                    elif period == "weekly":
+                        guild_value = guild_exp[game_type]['lifetime'] - guild_exp[game_type]['weekly']
+                    elif period == "monthly":
+                        guild_value = guild_exp[game_type]['lifetime'] - guild_exp[game_type]['monthly']
+                    else:
+                        guild_value = 0
+                    
+                    # Build leaderboard for this game type and period
+                    leaderboard = []
+                    for gname, data in all_guilds_data.items():
+                        g_is_tracked = data['is_tracked']
+                        
+                        # Skip untracked guilds for non-lifetime periods
+                        if period != "lifetime" and not g_is_tracked:
+                            continue
+                        
+                        g_exp = data['exp']
+                        
+                        # Skip if guild doesn't have this game type
+                        if game_type not in g_exp:
+                            continue
+                        
+                        # Get exp value for this period
+                        if period == "lifetime":
+                            value = g_exp[game_type]['lifetime']
+                        elif period == "session":
+                            value = g_exp[game_type]['lifetime'] - g_exp[game_type]['session']
+                        elif period == "daily":
+                            value = g_exp[game_type]['lifetime'] - g_exp[game_type]['daily']
+                        elif period == "yesterday":
+                            value = g_exp[game_type]['daily'] - g_exp[game_type]['yesterday']
+                        elif period == "weekly":
+                            value = g_exp[game_type]['lifetime'] - g_exp[game_type]['weekly']
+                        elif period == "monthly":
+                            value = g_exp[game_type]['lifetime'] - g_exp[game_type]['monthly']
+                        else:
+                            value = 0
+                        
+                        # Include all values, even 0
+                        leaderboard.append((gname, value))
+                    
+                    # Sort descending
+                    leaderboard.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Find guild's position
+                    total_guilds = len(leaderboard)
+                    rank = None
+                    for idx, (gname, value) in enumerate(leaderboard):
+                        if gname.lower() == guild_name.lower():
+                            rank = idx + 1
+                            break
+                    
+                    # Always add the ranking, even if guild has 0 exp (will be ranked last)
+                    if rank is not None:
+                        result[period][game_type] = (rank, total_guilds, guild_value)
+                    
+            except Exception as e:
+                print(f"[GUILD RANKINGS] Error processing game type {game_type}: {e}")
+                continue
+        
+        print(f"[GUILD RANKINGS] Calculated all rankings in {time.time() - start_time:.2f}s total")
+        return result
+        
+    except Exception as e:
+        print(f"[GUILD RANKINGS] Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 class RankingsTabView(discord.ui.View):
     """View for displaying user rankings across all metrics with period tabs."""
     
@@ -10301,6 +10450,198 @@ class RankingsPeriodSelect(discord.ui.Select):
         await self.view_ref._refresh_period(interaction, selected)
 
 
+class GuildRankingsTabView(discord.ui.View):
+    """View for displaying guild rankings across all game types with period tabs."""
+    
+    def __init__(self, guild_name: str, rankings_data: dict, guild_is_tracked: bool):
+        super().__init__()
+        self.guild_name = guild_name
+        self.rankings_data = rankings_data
+        self.guild_is_tracked = guild_is_tracked
+        self.current_period = "lifetime"
+        self.page = 0
+        self.page_size = 10
+        
+        # Add buttons conditionally
+        self._add_buttons()
+    
+    def _add_buttons(self):
+        """Add buttons and dropdowns."""
+        # Add period selector dropdown (only if guild is tracked)
+        if self.guild_is_tracked:
+            self.period_select = GuildRankingsPeriodSelect(self)
+            self.add_item(self.period_select)
+        
+        # Add navigation buttons (always show)
+        self.prev_button = discord.ui.Button(
+            label="Prev Page",
+            custom_id="guild_page_prev",
+            style=discord.ButtonStyle.secondary,
+            row=1
+        )
+        self.prev_button.callback = self.prev_page
+        self.add_item(self.prev_button)
+        
+        self.next_button = discord.ui.Button(
+            label="Next Page",
+            custom_id="guild_page_next",
+            style=discord.ButtonStyle.secondary,
+            row=1
+        )
+        self.next_button.callback = self.next_page
+        self.add_item(self.next_button)
+    
+    def _paginate(self, rankings_list: list, page: int):
+        """Paginate rankings list."""
+        total_pages = max(1, (len(rankings_list) + self.page_size - 1) // self.page_size)
+        clamped_page = max(0, min(page, total_pages - 1))
+        start_index = clamped_page * self.page_size
+        return rankings_list[start_index:start_index + self.page_size], total_pages, clamped_page
+    
+    def generate_rankings_image(self):
+        """Generate image showing all rankings for current period."""
+        period_data = self.rankings_data.get(self.current_period, {})
+        
+        if not period_data:
+            embed = discord.Embed(
+                title=f"🏆 Guild Rankings for {self.guild_name}",
+                description=f"No {self.current_period} data available for this guild.",
+                color=discord.Color.from_rgb(54, 57, 63)
+            )
+            if not self.guild_is_tracked:
+                embed.set_footer(text=f"`{self.guild_name}` is not currently tracked. Only all-time stats are available.\nUse `/trackguild guild_name:{self.guild_name}` to start tracking.")
+            return embed, None, 1
+        
+        # Build ranking data for image
+        rankings_list = []
+        for game_type, (rank, total, value) in sorted(period_data.items(), key=lambda x: x[1][0]):
+            # Format game type name: replace underscores with spaces and title case
+            game_label = game_type.replace("_", " ").title()
+            formatted_value = f"{int(value):,}"
+            rankings_list.append((rank, game_label, formatted_value))
+        
+        # Paginate the rankings
+        paginated_list, total_pages, clamped_page = self._paginate(rankings_list, self.page)
+        self.page = clamped_page
+        
+        # Generate image if Pillow is available
+        if Image is not None:
+            try:
+                img_io = create_rankings_image(
+                    self.guild_name,
+                    "Guild Experience",
+                    self.current_period,
+                    paginated_list,
+                    page=clamped_page,
+                    total_pages=total_pages
+                )
+                filename = f"guild_rankings_{self.guild_name}_{self.current_period}_p{clamped_page + 1}.png"
+                file = discord.File(img_io, filename=filename)
+                
+                # Add footer message if guild is not tracked
+                footer_embed = None
+                if not self.guild_is_tracked:
+                    footer_embed = discord.Embed(
+                        description=f"`{self.guild_name}` is not currently tracked. Only all-time stats are available.\nUse `/trackguild guild_name:{self.guild_name}` to start tracking.",
+                        color=discord.Color.from_rgb(54, 57, 63)
+                    )
+                
+                return footer_embed, file, total_pages
+            except Exception as e:
+                print(f"[WARNING] Guild rankings image generation failed: {e}")
+                # Fall back to embed if image generation fails
+                pass
+        
+        # Fallback embed if Pillow not available or image generation failed
+        paginated_list, total_pages, clamped_page = self._paginate(rankings_list, self.page)
+        self.page = clamped_page
+        
+        ranking_lines = []
+        for rank, game_label, formatted_value in paginated_list:
+            ranking_lines.append(f"#{rank} {game_label}: {formatted_value}")
+        
+        title = f"{self.current_period.title()} Guild Rankings for {self.guild_name}"
+        description = f"```ansi\n" + "\n".join(ranking_lines) + "\n```"
+        
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=discord.Color.from_rgb(54, 57, 63)
+        )
+        
+        if not self.guild_is_tracked:
+            embed.set_footer(text=f"`{self.guild_name}` is not currently tracked. Only all-time stats are available.\nUse `/trackguild guild_name:{self.guild_name}` to start tracking.")
+        else:
+            embed.set_footer(text=f"Rankings updated in real-time | Page {clamped_page + 1}/{total_pages}")
+        
+        return embed, None, total_pages
+    
+    async def _refresh_period(self, interaction: discord.Interaction, new_period: str):
+        """Refresh the view with a new period."""
+        self.current_period = new_period
+        self.page = 0  # Reset to first page when changing period
+        
+        # Update dropdown selection
+        if self.guild_is_tracked and hasattr(self, 'period_select'):
+            for option in self.period_select.options:
+                option.default = option.value == new_period
+        
+        embed, file, _ = self.generate_rankings_image()
+        
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file], embed=embed)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def _refresh_page(self, interaction: discord.Interaction, page_delta: int):
+        """Refresh the view with a different page."""
+        self.page += page_delta
+        
+        embed, file, _ = self.generate_rankings_image()
+        
+        if file:
+            await interaction.response.edit_message(view=self, attachments=[file], embed=embed)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def prev_page(self, interaction: discord.Interaction):
+        """Go to previous page."""
+        await self._refresh_page(interaction, -1)
+    
+    async def next_page(self, interaction: discord.Interaction):
+        """Go to next page."""
+        await self._refresh_page(interaction, 1)
+
+
+class GuildRankingsPeriodSelect(discord.ui.Select):
+    """Dropdown for selecting the time period in guild rankings view."""
+    
+    def __init__(self, view: GuildRankingsTabView):
+        options = [
+            discord.SelectOption(label="Lifetime", value="lifetime", default=True),
+            discord.SelectOption(label="Session", value="session"),
+            discord.SelectOption(label="Daily", value="daily"),
+            discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Weekly", value="weekly"),
+            discord.SelectOption(label="Monthly", value="monthly"),
+        ]
+        super().__init__(
+            placeholder="Select rankings period",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="guild_rankings_period_select",
+            row=0
+        )
+        self.view_ref = view
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        for opt in self.options:
+            opt.default = opt.value == selected
+        await self.view_ref._refresh_period(interaction, selected)
+
+
 # Create rankings command group
 rankings_group = discord.app_commands.Group(name="rankings", description="View all leaderboard positions for a player")
 
@@ -10327,6 +10668,12 @@ async def rankings_ctw(interaction: discord.Interaction, ign: str = None):
 async def rankings_ww(interaction: discord.Interaction, ign: str = None):
     """Wool Wars stats rankings."""
     await _handle_rankings(interaction, "ww", ign)
+
+@rankings_group.command(name="guild", description="View all guild experience rankings")
+@discord.app_commands.describe(guild_name="Guild name")
+async def rankings_guild(interaction: discord.Interaction, guild_name: str):
+    """Guild experience rankings."""
+    await _handle_guild_rankings(interaction, guild_name)
 
 # Add the rankings group to the bot
 bot.tree.add_command(rankings_group)
@@ -10428,6 +10775,80 @@ async def _handle_rankings(interaction: discord.Interaction, category: str, ign:
         
     except Exception as e:
         print(f"[RANKINGS] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}")
+
+
+async def _handle_guild_rankings(interaction: discord.Interaction, guild_name: str):
+    """Handler for guild rankings command."""
+    # Defer response
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except Exception as defer_error:
+            print(f"[GUILD RANKINGS] Failed to defer: {defer_error}")
+    
+    try:
+        # Check if guild exists in database
+        guild_exists_in_db = is_registered_guild(guild_name)
+        guild_is_tracked = is_tracked_guild(guild_name)
+        should_cleanup = False
+        
+        # If guild doesn't exist in database, fetch from API
+        if not guild_exists_in_db:
+            # Import here to avoid circular imports
+            from api_get import api_update_guild_database
+            
+            try:
+                result = await asyncio.to_thread(api_update_guild_database, guild_name)
+                if result:
+                    print(f"[GUILD RANKINGS] Fetched stats for untracked guild: {guild_name}")
+                    should_cleanup = True  # Clean up after displaying rankings
+                else:
+                    await interaction.followup.send(f"❌ Could not find guild '{guild_name}' on the API.")
+                    return
+            except Exception as e:
+                print(f"[GUILD RANKINGS] Failed to fetch guild from API: {e}")
+                await interaction.followup.send(f"❌ Could not find guild '{guild_name}' on the API.")
+                return
+        
+        # Calculate rankings for all game types
+        rankings_data = await asyncio.to_thread(_calculate_guild_rankings, guild_name)
+        
+        if not rankings_data:
+            await interaction.followup.send(f"❌ Could not find stats for guild '{guild_name}'.")
+            return
+        
+        # Check if guild has any rankings
+        has_data = any(len(period_data) > 0 for period_data in rankings_data.values())
+        if not has_data:
+            await interaction.followup.send(f"❌ No ranking data found for guild '{guild_name}'.")
+            return
+        
+        # Create view and send
+        view = GuildRankingsTabView(guild_name, rankings_data, guild_is_tracked)
+        embed, file, _ = view.generate_rankings_image()
+        
+        if file:
+            await interaction.followup.send(view=view, file=file, embed=embed)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
+        
+        # Clean up: Remove guild from database if it was temporarily added
+        if should_cleanup:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('DELETE FROM tracked_guilds WHERE name = ?', (guild_name,))
+                    cursor.execute('DELETE FROM gexp WHERE name = ?', (guild_name,))
+                    conn.commit()
+                print(f"[GUILD RANKINGS] Cleaned up temporarily added guild: {guild_name}")
+            except Exception as cleanup_error:
+                print(f"[GUILD RANKINGS] Failed to cleanup guild {guild_name}: {cleanup_error}")
+        
+    except Exception as e:
+        print(f"[GUILD RANKINGS] Error: {e}")
         import traceback
         traceback.print_exc()
         await interaction.followup.send(f"❌ [ERROR] {str(e)}")
