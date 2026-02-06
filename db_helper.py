@@ -122,15 +122,18 @@ def init_database(db_path: Optional[Path] = None):
                 guild_tag TEXT DEFAULT NULL,
                 guild_hex TEXT DEFAULT NULL,
                 rank TEXT DEFAULT NULL,
-                uuid TEXT DEFAULT NULL
+                uuid TEXT DEFAULT NULL,
+                guild_name TEXT DEFAULT NULL
             )
         ''')
         
-        # Check if uuid column exists in user_meta, add if not
+        # Check if uuid and guild_name columns exist in user_meta, add if not
         cursor.execute("PRAGMA table_info(user_meta)")
         columns = [col[1] for col in cursor.fetchall()]
         if 'uuid' not in columns:
             cursor.execute('ALTER TABLE user_meta ADD COLUMN uuid TEXT DEFAULT NULL')
+        if 'guild_name' not in columns:
+            cursor.execute('ALTER TABLE user_meta ADD COLUMN guild_name TEXT DEFAULT NULL')
         
         # Create index on UUID for fast lookups
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_meta_uuid ON user_meta(uuid)')
@@ -227,6 +230,58 @@ def init_database(db_path: Optional[Path] = None):
         # Create indexes for layouts
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_hotbar_layouts_username ON hotbar_layouts(username)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_hotbar_layouts_game ON hotbar_layouts(game)')
+        
+        # Guild experience table - stores guild exp by game type
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS gexp (
+                name TEXT NOT NULL,
+                game TEXT NOT NULL,
+                exp REAL DEFAULT 0,
+                lifetime REAL DEFAULT 0,
+                session REAL DEFAULT 0,
+                daily REAL DEFAULT 0,
+                yesterday REAL DEFAULT 0,
+                weekly REAL DEFAULT 0,
+                monthly REAL DEFAULT 0,
+                tag TEXT DEFAULT NULL,
+                tag_color TEXT DEFAULT NULL,
+                PRIMARY KEY (name, game)
+            )
+        ''')
+        
+        # Check if tag and tag_color columns exist in gexp, add if not
+        cursor.execute("PRAGMA table_info(gexp)")
+        gexp_columns = [col[1] for col in cursor.fetchall()]
+        if 'tag' not in gexp_columns:
+            cursor.execute('ALTER TABLE gexp ADD COLUMN tag TEXT DEFAULT NULL')
+        if 'tag_color' not in gexp_columns:
+            cursor.execute('ALTER TABLE gexp ADD COLUMN tag_color TEXT DEFAULT NULL')
+        
+        # Create indexes for guild exp
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gexp_name ON gexp(name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gexp_game ON gexp(game)')
+        
+        # Tracked guilds table - list of guilds being actively tracked
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tracked_guilds (
+                name TEXT PRIMARY KEY,
+                added_at INTEGER DEFAULT (strftime('%s', 'now')),
+                is_tracked INTEGER DEFAULT 1,
+                guild_tag TEXT DEFAULT NULL,
+                guild_hex TEXT DEFAULT NULL
+            )
+        ''')
+        
+        # Check if guild_tag and guild_hex columns exist in tracked_guilds, add if not
+        cursor.execute("PRAGMA table_info(tracked_guilds)")
+        tg_columns = [col[1] for col in cursor.fetchall()]
+        if 'guild_tag' not in tg_columns:
+            cursor.execute('ALTER TABLE tracked_guilds ADD COLUMN guild_tag TEXT DEFAULT NULL')
+        if 'guild_hex' not in tg_columns:
+            cursor.execute('ALTER TABLE tracked_guilds ADD COLUMN guild_hex TEXT DEFAULT NULL')
+        
+        # Create index for tracked guilds
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tracked_guilds_name ON tracked_guilds(name)')
         
         conn.commit()
 
@@ -504,7 +559,8 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
                     ign_color: Optional[str] = None,
                     guild_tag: Optional[str] = None,
                     guild_hex: Optional[str] = None,
-                    rank: Optional[str] = None):
+                    rank: Optional[str] = None,
+                    guild_name: Optional[str] = None):
     """Update user metadata.
     
     None values are ignored (existing values preserved).
@@ -542,6 +598,9 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
             if rank is not None:
                 updates.append("rank = ?")
                 params.append(rank)
+            if guild_name is not None:
+                updates.append("guild_name = ?")
+                params.append(guild_name if guild_name != "" else None)
             
             if updates:
                 params.append(target_username)
@@ -551,8 +610,8 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
             # Insert new record
             cursor.execute('''
                 INSERT INTO user_meta 
-                (username, level, icon, ign_color, guild_tag, guild_hex, rank)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (username, level, icon, ign_color, guild_tag, guild_hex, rank, guild_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 username, 
                 level if level is not None else 0, 
@@ -560,7 +619,8 @@ def update_user_meta(username: str, level: Optional[int] = None, icon: Optional[
                 ign_color if ign_color != "" else None, 
                 str(guild_tag) if guild_tag and guild_tag != "" else None, 
                 guild_hex if guild_hex != "" else None,
-                rank
+                rank,
+                guild_name if guild_name != "" else None
             ))
         
         conn.commit()
@@ -603,6 +663,41 @@ def rotate_daily_to_yesterday(usernames: List[str]) -> Dict[str, bool]:
     return results
 
 
+def rotate_guild_daily_to_yesterday(guild_names: List[str]) -> Dict[str, bool]:
+    """Copy daily snapshot to yesterday snapshot for specified guilds.
+    
+    This is called before the daily refresh to preserve yesterday's stats.
+    
+    Args:
+        guild_names: List of guild names to rotate
+        
+    Returns:
+        Dict mapping guild name to success status
+    """
+    results = {}
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        for guild_name in guild_names:
+            try:
+                # Copy daily column to yesterday column for all games
+                cursor.execute('''
+                    UPDATE gexp
+                    SET yesterday = daily
+                    WHERE name = ?
+                ''', (guild_name,))
+                
+                results[guild_name] = True
+            except Exception as e:
+                print(f"[ERROR] Failed to rotate guild {guild_name}: {e}")
+                results[guild_name] = False
+        
+        conn.commit()
+    
+    return results
+
+
 def reset_weekly_snapshots(usernames: List[str]) -> Dict[str, bool]:
     """Reset weekly snapshot to current lifetime values for specified users.
     
@@ -634,6 +729,41 @@ def reset_weekly_snapshots(usernames: List[str]) -> Dict[str, bool]:
             except Exception as e:
                 print(f"[ERROR] Failed to reset weekly for {username}: {e}")
                 results[username] = False
+        
+        conn.commit()
+    
+    return results
+
+
+def reset_guild_weekly_snapshots(guild_names: List[str]) -> Dict[str, bool]:
+    """Reset weekly snapshot to current lifetime values for specified guilds.
+    
+    This is called every Monday at 9:30 AM EST to reset the weekly tracking period.
+    
+    Args:
+        guild_names: List of guild names to reset
+        
+    Returns:
+        Dict mapping guild name to success status
+    """
+    results = {}
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        for guild_name in guild_names:
+            try:
+                # Set weekly snapshot to current lifetime value for all games
+                cursor.execute('''
+                    UPDATE gexp
+                    SET weekly = lifetime
+                    WHERE name = ?
+                ''', (guild_name,))
+                
+                results[guild_name] = True
+            except Exception as e:
+                print(f"[ERROR] Failed to reset weekly for guild {guild_name}: {e}")
+                results[guild_name] = False
         
         conn.commit()
     
@@ -1390,4 +1520,389 @@ def get_hotbar_layouts(username: str, game: Optional[str] = None, db_path: Optio
             ''', (username,))
         
         return [dict(row) for row in cursor.fetchall()]
+
+
+# ==============================
+# GUILD EXPERIENCE FUNCTIONS
+# ==============================
+
+def add_tracked_guild(guild_name: str, guild_tag: Optional[str] = None, guild_hex: Optional[str] = None, db_path: Optional[Path] = None) -> bool:
+    """Add a guild to the tracked guilds list (sets is_tracked=1 for automatic updates).
+    
+    Args:
+        guild_name: Guild name
+        guild_tag: Guild tag (e.g., "GOAT")
+        guild_hex: Guild tag color (e.g., "DARK_AQUA")
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if guild was newly tracked, False if already existed
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Check if guild exists
+        cursor.execute('SELECT is_tracked FROM tracked_guilds WHERE name = ?', (guild_name,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Guild already exists - update to is_tracked=1 and update tag/color
+            cursor.execute('''
+                UPDATE tracked_guilds SET is_tracked = 1, guild_tag = ?, guild_hex = ?
+                WHERE name = ?
+            ''', (guild_tag, guild_hex, guild_name))
+            was_already_tracked = existing['is_tracked'] == 1
+            conn.commit()
+            if was_already_tracked:
+                print(f"[DB] Guild '{guild_name}' is already tracked")
+            else:
+                print(f"[DB] Enabled tracking for guild '{guild_name}'")
+            return not was_already_tracked
+        else:
+            # New guild - insert with is_tracked=1
+            cursor.execute('''
+                INSERT INTO tracked_guilds (name, added_at, is_tracked, guild_tag, guild_hex)
+                VALUES (?, strftime('%s', 'now'), 1, ?, ?)
+            ''', (guild_name, guild_tag, guild_hex))
+            conn.commit()
+            print(f"[DB] Added and tracked guild '{guild_name}'")
+            return True
+
+
+def remove_tracked_guild(guild_name: str, db_path: Optional[Path] = None) -> bool:
+    """Remove a guild from the tracked guilds list.
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if guild was removed, False if it didn't exist
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT name FROM tracked_guilds WHERE name = ?', (guild_name,))
+        if cursor.fetchone():
+            cursor.execute('UPDATE tracked_guilds SET is_tracked = 0 WHERE name = ?', (guild_name,))
+            conn.commit()
+            print(f"[DB] Removed guild '{guild_name}' from tracked guilds")
+            return True
+        return False
+
+
+def is_tracked_guild(guild_name: str, db_path: Optional[Path] = None) -> bool:
+    """Check if a guild is being tracked.
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if guild is tracked, False otherwise
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT is_tracked FROM tracked_guilds 
+            WHERE name = ?
+        ''', (guild_name,))
+        row = cursor.fetchone()
+        return bool(row and row['is_tracked'])
+
+
+def get_tracked_guilds(db_path: Optional[Path] = None) -> List[str]:
+    """Get list of all tracked guilds.
+    
+    Args:
+        db_path: Optional custom path to database file
+        
+    Returns:
+        List of guild names
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT name FROM tracked_guilds 
+            WHERE is_tracked = 1
+            ORDER BY name
+        ''')
+        return [row['name'] for row in cursor.fetchall()]
+
+
+def guild_has_tracked_members(guild_name: str, db_path: Optional[Path] = None) -> bool:
+    """Check if a guild has any tracked members.
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if the guild has at least one tracked member, False otherwise
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1
+            FROM user_meta um
+            JOIN tracked_users tu ON LOWER(um.username) = LOWER(tu.username)
+            WHERE um.guild_name = ? AND tu.is_tracked = 1
+            LIMIT 1
+        ''', (guild_name,))
+        return cursor.fetchone() is not None
+
+
+def get_guilds_for_periodic_updates(db_path: Optional[Path] = None) -> List[str]:
+    """Get list of tracked guilds that need periodic updates.
+    
+    Returns only guilds that have NO tracked members (to avoid redundant API calls,
+    since guild data is updated when any tracked member is updated).
+    
+    Args:
+        db_path: Optional custom path to database file
+        
+    Returns:
+        List of guild names that need periodic updates
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT tg.name
+            FROM tracked_guilds tg
+            WHERE tg.is_tracked = 1
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_meta um
+                JOIN tracked_users tu ON LOWER(um.username) = LOWER(tu.username)
+                WHERE um.guild_name = tg.name AND tu.is_tracked = 1
+            )
+            ORDER BY tg.name
+        ''')
+        return [row['name'] for row in cursor.fetchall()]
+
+
+def register_guild(guild_name: str, guild_tag: Optional[str] = None, guild_hex: Optional[str] = None, db_path: Optional[Path] = None) -> bool:
+    """Register a guild in the database without actively tracking it (is_tracked=0).
+    
+    This allows the guild to appear in leaderboards with accurate stats,
+    but it won't receive periodic automatic updates.
+    
+    Args:
+        guild_name: Guild name
+        guild_tag: Guild tag (e.g., "GOAT")
+        guild_hex: Guild tag color (e.g., "DARK_AQUA")
+        db_path: Optional custom path to database file
+        
+    Returns:
+        bool: True if guild was registered, False if already exists
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        # Check if guild already exists
+        cursor.execute('SELECT name FROM tracked_guilds WHERE name = ?', (guild_name,))
+        if cursor.fetchone():
+            return False
+        
+        # Add the guild with is_tracked=0 (registered but not actively tracked)
+        cursor.execute('''
+            INSERT INTO tracked_guilds (name, added_at, is_tracked, guild_tag, guild_hex)
+            VALUES (?, strftime('%s', 'now'), 0, ?, ?)
+        ''', (guild_name, guild_tag, guild_hex))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def is_registered_guild(guild_name: str, db_path: Optional[Path] = None) -> bool:
+    """Check if a guild is registered (tracked or not).
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if guild is registered (either tracked or just registered), False otherwise
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM tracked_guilds WHERE name = ?', (guild_name,))
+        return cursor.fetchone() is not None
+
+
+def update_guild_exp(guild_name: str, game_exp_data: Dict[str, float], 
+                     snapshot_sections: Optional[Set[str]] = None,
+                     guild_tag: Optional[str] = None,
+                     guild_tag_color: Optional[str] = None,
+                     db_path: Optional[Path] = None):
+    """Update guild experience stats in the database.
+    
+    This function OVERWRITES exp values - it does not calculate deltas.
+    The snapshot_sections parameter is used to reset specific time periods.
+    
+    Args:
+        guild_name: Guild name
+        game_exp_data: Dict mapping game types to exp values (includes 'GENERAL' for overall exp)
+        snapshot_sections: Set of snapshot sections to reset ('session', 'daily', 'monthly', 'yesterday')
+        guild_tag: Guild tag (e.g., "PIXING")
+        guild_tag_color: Guild tag color (e.g., "GRAY")
+        db_path: Optional custom path to database file
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Ensure guild exists in tracked_guilds (similar to how players are auto-registered)
+        cursor.execute('SELECT name, is_tracked FROM tracked_guilds WHERE name = ?', (guild_name,))
+        existing_guild = cursor.fetchone()
+        
+        if existing_guild:
+            # Guild exists - update tag and color if provided
+            updates = []
+            params = []
+            if guild_tag is not None:
+                updates.append('guild_tag = ?')
+                params.append(guild_tag)
+            if guild_tag_color is not None:
+                updates.append('guild_hex = ?')
+                params.append(guild_tag_color)
+            
+            if updates:
+                params.append(guild_name)
+                cursor.execute(f'''
+                    UPDATE tracked_guilds
+                    SET {', '.join(updates)}
+                    WHERE name = ?
+                ''', params)
+                print(f"[DB] Updated tracked_guilds with tag='{guild_tag}' color='{guild_tag_color}' for '{guild_name}'")
+        else:
+            # Guild doesn't exist - auto-register it with is_tracked=0
+            cursor.execute('''
+                INSERT INTO tracked_guilds (name, added_at, is_tracked, guild_tag, guild_hex)
+                VALUES (?, strftime('%s', 'now'), 0, ?, ?)
+            ''', (guild_name, guild_tag, guild_tag_color))
+            print(f"[DB] Auto-registered guild '{guild_name}' with is_tracked=0")
+        
+        for game, exp_value in game_exp_data.items():
+            # Get current values
+            cursor.execute('''
+                SELECT exp, lifetime, session, daily, yesterday, weekly, monthly
+                FROM gexp
+                WHERE name = ? AND game = ?
+            ''', (guild_name, game))
+            
+            row = cursor.fetchone()
+            
+            if row:
+                # Guild+game combo exists - overwrite exp and lifetime
+                old_exp = row['exp']
+                old_lifetime = row['lifetime']
+                session = row['session']
+                daily = row['daily']
+                yesterday = row['yesterday']
+                weekly = row['weekly']
+                monthly = row['monthly']
+                
+                # Overwrite exp value
+                new_lifetime = exp_value
+                
+                # Handle snapshot resets
+                if snapshot_sections:
+                    if 'session' in snapshot_sections:
+                        session = exp_value
+                    if 'daily' in snapshot_sections:
+                        daily = exp_value
+                    if 'yesterday' in snapshot_sections:
+                        yesterday = exp_value
+                    if 'weekly' in snapshot_sections:
+                        weekly = exp_value
+                    if 'monthly' in snapshot_sections:
+                        monthly = exp_value
+                
+                cursor.execute('''
+                    UPDATE gexp
+                    SET exp = ?, lifetime = ?, session = ?, daily = ?, 
+                        yesterday = ?, weekly = ?, monthly = ?, tag = ?, tag_color = ?
+                    WHERE name = ? AND game = ?
+                ''', (exp_value, new_lifetime, session, daily, yesterday, weekly, monthly,
+                      guild_tag, guild_tag_color, guild_name, game))
+            else:
+                # New guild+game combo - insert with exp value
+                # For new guilds, initialize snapshots to lifetime (so deltas start at 0)
+                # Exception: session should be 0 to show session progress
+                session = exp_value if snapshot_sections and 'session' in snapshot_sections else 0
+                daily = exp_value if snapshot_sections and 'daily' in snapshot_sections else exp_value
+                yesterday = exp_value if snapshot_sections and 'yesterday' in snapshot_sections else exp_value
+                weekly = exp_value if snapshot_sections and 'weekly' in snapshot_sections else exp_value
+                monthly = exp_value if snapshot_sections and 'monthly' in snapshot_sections else exp_value
+                
+                cursor.execute('''
+                    INSERT INTO gexp (name, game, exp, lifetime, session, daily, yesterday, weekly, monthly, tag, tag_color)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (guild_name, game, exp_value, exp_value, session, daily, yesterday, weekly, monthly,
+                      guild_tag, guild_tag_color))
+        
+        conn.commit()
+        print(f"[DB] Updated guild exp for '{guild_name}' ({len(game_exp_data)} games)")
+
+
+def get_guild_exp(guild_name: str, db_path: Optional[Path] = None) -> Dict[str, Dict[str, float]]:
+    """Get all guild experience data for a guild.
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        Dict mapping game types to stat dictionaries with periods
+        Example: {'GENERAL': {'exp': 1000, 'lifetime': 1000, 'session': 500, ...}, ...}
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT game, exp, lifetime, session, daily, yesterday, weekly, monthly
+            FROM gexp
+            WHERE name = ?
+        ''', (guild_name,))
+        
+        result = {}
+        for row in cursor.fetchall():
+            result[row['game']] = {
+                'exp': row['exp'],
+                'lifetime': row['lifetime'],
+                'session': row['session'],
+                'daily': row['daily'],
+                'yesterday': row['yesterday'],
+                'weekly': row['weekly'],
+                'monthly': row['monthly']
+            }
+        
+        return result
+
+
+def get_all_guilds() -> List[str]:
+    """Get list of all guilds in the database.
+    
+    Returns:
+        List of guild names
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT DISTINCT name FROM gexp ORDER BY name')
+        return [row['name'] for row in cursor.fetchall()]
+
+
+def guild_exists(guild_name: str, db_path: Optional[Path] = None) -> bool:
+    """Check if a guild exists in the database.
+    
+    Args:
+        guild_name: Guild name
+        db_path: Optional custom path to database file
+        
+    Returns:
+        True if guild has any exp data, False otherwise
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM gexp WHERE name = ? LIMIT 1', (guild_name,))
+        return cursor.fetchone() is not None
+
+
+
 

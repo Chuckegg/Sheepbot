@@ -39,7 +39,18 @@ from db_helper import (
     get_uuid_for_username,
     resolve_username_to_uuid,
     update_username_for_uuid,
-    get_hotbar_layouts
+    get_hotbar_layouts,
+    # Guild functions
+    add_tracked_guild,
+    remove_tracked_guild,
+    is_tracked_guild,
+    get_tracked_guilds,
+    get_guilds_for_periodic_updates,
+    guild_has_tracked_members,
+    update_guild_exp,
+    get_guild_exp,
+    get_all_guilds,
+    guild_exists
 )
 import re
 import shutil
@@ -2474,28 +2485,44 @@ def create_leaderboard_image(tab_name: str, metric_label: str, leaderboard_data:
         
         draw.text((margin + 20, y + 15), f"#{rank}", font=font_rank, fill=r_col)
         
-        # Prestige
+        # Prestige (skip for guilds - when level=0 and icon is empty)
         rank_w = draw.textbbox((0,0), f"#{rank}", font=font_rank)[2] - draw.textbbox((0,0), f"#{rank}", font=font_rank)[0]
         p_x = margin + 20 + rank_w + 15
         
-        segments = get_prestige_segments(level, icon)
-        current_x = p_x
-        for hex_color, text in segments:
-            try:
-                rgb = tuple(int(hex_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-            except:
-                rgb = (255, 255, 255)
-            draw.text((current_x, y + 15), text, font=font_name, fill=rgb)
-            seg_w = draw.textbbox((0,0), text, font=font_name)[2] - draw.textbbox((0,0), text, font=font_name)[0]
-            current_x += seg_w
+        # Check if this is a guild entry (no prestige)
+        is_guild = (level == 0 and icon == "")
         
-        # Name
-        n_x = current_x + 10
-        try:
-            p_rgb = tuple(int(str(p_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
-        except:
-            p_rgb = (255, 255, 255)
-        draw.text((n_x, y + 15), player, font=font_name, fill=p_rgb)
+        if not is_guild:
+            # Render prestige for players
+            segments = get_prestige_segments(level, icon)
+            current_x = p_x
+            for hex_color, text in segments:
+                try:
+                    rgb = tuple(int(hex_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+                except:
+                    rgb = (255, 255, 255)
+                draw.text((current_x, y + 15), text, font=font_name, fill=rgb)
+                seg_w = draw.textbbox((0,0), text, font=font_name)[2] - draw.textbbox((0,0), text, font=font_name)[0]
+                current_x += seg_w
+            n_x = current_x + 10
+        else:
+            # No prestige for guilds, start name directly after rank
+            n_x = p_x
+        
+        # Name - for guilds, use guild tag color instead of player color
+        if is_guild and g_hex:
+            # Use guild tag color for guild name
+            try:
+                name_rgb = tuple(int(str(g_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+            except:
+                name_rgb = (255, 255, 255)
+        else:
+            # Use player color for player names
+            try:
+                name_rgb = tuple(int(str(p_hex).lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+            except:
+                name_rgb = (255, 255, 255)
+        draw.text((n_x, y + 15), player, font=font_name, fill=name_rgb)
         
         # Guild
         safe_tag = _safe_guild_tag(g_tag)
@@ -3938,7 +3965,8 @@ class WWStatsView(discord.ui.View):
     """View for Wool Wars stats with class selection dropdown."""
     def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, 
                  ign_color: str = None, guild_tag: str = None, guild_hex: str = None,
-                 status_text="Online", status_color=(85, 255, 85), skin_image=None):
+                 status_text="Online", status_color=(85, 255, 85), skin_image=None, 
+                 show_period_buttons: bool = True):
         super().__init__()
         self.data = data_dict 
         self.ign = ign
@@ -3949,6 +3977,7 @@ class WWStatsView(discord.ui.View):
         self.skin_image = skin_image
         self.current_tab = "all-time"
         self.current_class = "overall"
+        self.show_period_buttons = show_period_buttons
         
         self.ign_color = ign_color
         self.guild_tag = guild_tag
@@ -3956,6 +3985,13 @@ class WWStatsView(discord.ui.View):
         
         if self.ign_color is None or self.guild_tag is None:
             self._load_color()
+        
+        # Remove period buttons if not tracked (keep only class dropdown)
+        if not show_period_buttons:
+            # Remove all button items from children (buttons are added by decorators)
+            items_to_remove = [item for item in self.children if isinstance(item, discord.ui.Button)]
+            for item in items_to_remove:
+                self.remove_item(item)
         
         # Add class selector
         self.class_selector = WWClassSelect(self)
@@ -6967,6 +7003,362 @@ async def track(interaction: discord.Interaction, ign: str):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+@bot.tree.command(name="add", description="[Admin] Add user(s) to database without tracking")
+@discord.app_commands.describe(
+    ign="Single Minecraft IGN to add",
+    ignswithcommas="Multiple IGNs separated by commas (e.g., user1,user2,user3)"
+)
+async def add_users(interaction: discord.Interaction, ign: str = None, ignswithcommas: str = None):
+    """Add one or multiple users to the database without tracking them."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    # Admin only
+    if not is_admin(interaction.user):
+        await interaction.edit_original_response(content="❌ [ERROR] This command is admin-only.")
+        return
+    
+    # Check that exactly one option is provided
+    if (ign is None and ignswithcommas is None) or (ign is not None and ignswithcommas is not None):
+        await interaction.edit_original_response(
+            content="❌ Error: Please provide exactly one of the following options:\n"
+            "• `ign:` for a single username\n"
+            "• `ignswithcommas:` for multiple usernames separated by commas"
+        )
+        return
+    
+    try:
+        if ign is not None:
+            # Single user - use api_get.py directly
+            # Validate username
+            ok, proper_ign = validate_and_normalize_ign(ign)
+            if not ok:
+                await interaction.edit_original_response(content=f"❌ The username `{ign}` is invalid.")
+                return
+            ign = proper_ign
+            
+            # Check if already tracked
+            if is_tracked_user(ign):
+                await interaction.edit_original_response(content=f"⚠️ `{ign}` is already tracked.")
+                return
+            
+            # Check if already registered (but not tracked)
+            if is_registered_user(ign):
+                await interaction.edit_original_response(content=f"⚠️ `{ign}` is already registered in the database.")
+                return
+            
+            # Fetch stats using api_get.py
+            await interaction.edit_original_response(content=f"🔄 Fetching stats for `{ign}`...")
+            result = run_script("api_get.py", ["-ign", ign])
+            
+            if result.returncode == 0:
+                # Parse output to get proper username
+                actual_ign = ign
+                if result.stdout:
+                    try:
+                        for line in reversed(result.stdout.splitlines()):
+                            if line.strip().startswith('{'):
+                                data = json.loads(line.strip())
+                                if 'username' in data:
+                                    actual_ign = data['username']
+                                    break
+                    except:
+                        pass
+                
+                # Register user (but don't track)
+                if register_user(actual_ign):
+                    await interaction.edit_original_response(
+                        content=f"✅ Successfully added `{actual_ign}` to the database!\n"
+                        f"💡 This user will appear in leaderboards but won't receive periodic updates.\n"
+                        f"Use `/track ign:{actual_ign}` to start tracking."
+                    )
+                else:
+                    await interaction.edit_original_response(content=f"⚠️ `{actual_ign}` may already be in the database.")
+            else:
+                err = (result.stderr or result.stdout) or "Unknown error"
+                await interaction.edit_original_response(content=f"❌ Error fetching stats for `{ign}`:\n```{sanitize_output(err[:500])}```")
+                
+        else:
+            # Multiple users - use add_to_db.py with temporary file
+            # Remove spaces and split by comma
+            cleaned = ignswithcommas.replace(" ", "")
+            usernames = [u.strip() for u in cleaned.split(",") if u.strip()]
+            
+            if not usernames:
+                await interaction.edit_original_response(content="❌ No valid usernames found in the comma-separated list.")
+                return
+            
+            # Validate all usernames first
+            invalid_users = []
+            valid_users = []
+            for username in usernames:
+                ok, proper_ign = validate_and_normalize_ign(username)
+                if ok:
+                    valid_users.append(proper_ign)
+                else:
+                    invalid_users.append(username)
+            
+            if invalid_users and not valid_users:
+                await interaction.edit_original_response(
+                    content=f"❌ Invalid username(s): {', '.join(f'`{u}`' for u in invalid_users)}\n"
+                    f"No valid usernames to process."
+                )
+                return
+            
+            if not valid_users:
+                await interaction.edit_original_response(content="❌ No valid usernames to process.")
+                return
+            
+            # Create temporary file with usernames
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir=BOT_DIR) as temp_file:
+                temp_filename = temp_file.name
+                for username in valid_users:
+                    temp_file.write(f"{username}\n")
+            
+            try:
+                # Show initial status message
+                status_msg = f"🔄 Processing {len(valid_users)} user(s)...\n"
+                if invalid_users:
+                    status_msg += f"⚠️ Skipping invalid username(s): {', '.join(f'`{u}`' for u in invalid_users)}\n"
+                status_msg += "This may take a few moments."
+                await interaction.edit_original_response(content=status_msg)
+                
+                # Run add_to_db.py with the temporary file
+                result = run_script_batch("add_to_db.py", [temp_filename])
+                
+                if result.returncode in [0, 2]:  # 0 = success, 2 = some failed
+                    # Parse the output to extract statistics
+                    output = result.stdout or ""
+                    
+                    # Send the summary
+                    summary_lines = []
+                    in_summary = False
+                    for line in output.splitlines():
+                        if "SUMMARY" in line or "="*20 in line:
+                            in_summary = True
+                        if in_summary and (line.strip().startswith("Total") or 
+                                          line.strip().startswith("✅") or 
+                                          line.strip().startswith("⏭️") or
+                                          line.strip().startswith("🔒") or
+                                          line.strip().startswith("❌")):
+                            summary_lines.append(line)
+                    
+                    if summary_lines:
+                        summary = "\n".join(summary_lines)
+                        await interaction.edit_original_response(
+                            content=f"✅ Batch processing complete!\n```\n{summary}\n```\n"
+                            f"💡 Added users will appear in leaderboards but won't receive periodic updates."
+                        )
+                    else:
+                        await interaction.edit_original_response(
+                            content=f"✅ Batch processing complete!\n"
+                            f"Processed {len(valid_users)} user(s)."
+                        )
+                else:
+                    err = (result.stderr or result.stdout) or "Unknown error"
+                    await interaction.edit_original_response(
+                        content=f"❌ Error processing users:\n```{sanitize_output(err[:1000])}```"
+                    )
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_filename)
+                except:
+                    pass
+                    
+    except subprocess.TimeoutExpired:
+        await interaction.edit_original_response(content="❌ [ERROR] Command timed out. Too many users or API is slow.")
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ [ERROR] {str(e)}")
+
+@bot.tree.command(name="trackguild", description="Track guild experience stats for a guild")
+@discord.app_commands.describe(guild="Guild name")
+async def trackguild(interaction: discord.Interaction, guild: str):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    try:
+        # Check if guild is already tracked
+        already_tracked = is_tracked_guild(guild)
+        
+        # Fetch guild data using api_get.py guild function
+        # We need to import and call api_update_guild_database
+        from api_get import api_update_guild_database, read_api_key_file
+        
+        api_key = read_api_key_file()
+        if not api_key:
+            await interaction.followup.send("❌ [ERROR] API key not configured.")
+            return
+        
+        # Initialize session, daily, and monthly snapshots
+        if already_tracked:
+            await interaction.edit_original_response(content=f"🔄 Updating guild data for `{guild}`...")
+        else:
+            await interaction.edit_original_response(content=f"🔄 Fetching guild data for `{guild}`...")
+        
+        result = api_update_guild_database(
+            guild, 
+            api_key, 
+            snapshot_sections={'session', 'daily', 'yesterday', 'weekly', 'monthly'} if not already_tracked else None
+        )
+        
+        if 'error' in result:
+            await interaction.edit_original_response(
+                content=f"❌ Error fetching guild data for `{guild}`:\n```{result['error'][:500]}```"
+            )
+            return
+        
+        # Get the proper guild name from the result
+        proper_name = result.get('guild_name', guild)
+        guild_tag = result.get('guild_tag', '')
+        guild_tag_color = result.get('guild_tag_color', '')
+        
+        # Add to tracked guilds list with tag info
+        added = add_tracked_guild(proper_name, guild_tag, guild_tag_color)
+        
+        games_count = len(result.get('games', []))
+        total_exp = result.get('total_exp', 0)
+        
+        if already_tracked:
+            await interaction.edit_original_response(
+                content=f"✅ Guild `{proper_name}` data has been updated!\n"
+                       f"📊 Tag: [{guild_tag}] • {games_count} game types • {total_exp:,} total experience."
+            )
+        else:
+            await interaction.edit_original_response(
+                content=f"✅ Guild `{proper_name}` is now being tracked!\n"
+                       f"📊 Tag: [{guild_tag}] • {games_count} game types • {total_exp:,} total experience."
+            )
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ [ERROR] {str(e)}")
+
+@bot.tree.command(name="untrackguild", description="[Admin] Stop tracking a guild")
+@discord.app_commands.describe(guild="Guild name")
+async def untrackguild(interaction: discord.Interaction, guild: str):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    # Admin only
+    if not is_admin(interaction.user):
+        await interaction.edit_original_response(content="❌ [ERROR] This command is admin-only.")
+        return
+    
+    try:
+        # Check if guild is tracked
+        if not is_tracked_guild(guild):
+            await interaction.followup.send(f"Guild `{guild}` is not being tracked.")
+            return
+        
+        # Remove from tracked guilds
+        removed = remove_tracked_guild(guild)
+        
+        if removed:
+            await interaction.followup.send(f"✅ Guild `{guild}` has been removed from tracking.")
+        else:
+            await interaction.followup.send(f"❌ Failed to remove guild `{guild}` from tracking.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}")
+
+@bot.tree.command(name="updateguilds", description="[Admin] Update tag data for all tracked guilds")
+async def updateguilds(interaction: discord.Interaction):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    # Admin only
+    if not is_admin(interaction.user):
+        await interaction.edit_original_response(content="❌ [ERROR] This command is admin-only.")
+        return
+    
+    try:
+        from api_get import api_update_guild_database, read_api_key_file
+        
+        api_key = read_api_key_file()
+        if not api_key:
+            await interaction.edit_original_response(content="❌ [ERROR] API key not configured.")
+            return
+        
+        # Get guilds that need periodic updates (guilds without tracked members)
+        # Guilds with tracked members get updated automatically when those members are updated
+        guilds_to_update = get_guilds_for_periodic_updates()
+        all_tracked = get_tracked_guilds()
+        skipped_count = len(all_tracked) - len(guilds_to_update)
+        
+        # Print detailed breakdown to console
+        print("\n" + "="*80)
+        print(f"[GUILD UPDATE] Tracked Guilds Analysis ({len(all_tracked)} total)")
+        print("="*80)
+        
+        guilds_to_update_set = set(guilds_to_update)
+        
+        for guild_name in all_tracked:
+            will_update = guild_name in guilds_to_update_set
+            has_members = guild_has_tracked_members(guild_name)
+            
+            if will_update:
+                print(f"✅ {guild_name}")
+                print(f"   → Will receive periodic updates (no tracked members)")
+            else:
+                print(f"⏭️  {guild_name}")
+                print(f"   → Skipping periodic updates (has tracked members, updates automatically)")
+        
+        print("="*80)
+        print(f"[SUMMARY] Updates needed: {len(guilds_to_update)} | Skipped: {skipped_count}")
+        print("="*80 + "\n")
+        
+        if not guilds_to_update:
+            if skipped_count > 0:
+                await interaction.edit_original_response(
+                    content=f"✅ All {len(all_tracked)} tracked guild(s) have tracked members and will be updated automatically.\nNo periodic updates needed."
+                )
+            else:
+                await interaction.edit_original_response(content="❌ No guilds are being tracked.")
+            return
+        
+        status_msg = f"🔄 Updating {len(guilds_to_update)} guild(s)..."
+        if skipped_count > 0:
+            status_msg += f"\n(Skipping {skipped_count} guild(s) with tracked members)"
+        status_msg += "\nThis may take a moment."
+        await interaction.edit_original_response(content=status_msg)
+        
+        success_count = 0
+        failed = []
+        
+        for guild_name in guilds_to_update:
+            try:
+                result = api_update_guild_database(guild_name, api_key)
+                if 'error' not in result:
+                    success_count += 1
+                else:
+                    failed.append(f"{guild_name}: {result['error'][:50]}")
+            except Exception as e:
+                failed.append(f"{guild_name}: {str(e)[:50]}")
+        
+        # Build response message
+        msg = f"✅ Successfully updated {success_count}/{len(guilds_to_update)} guild(s)."
+        if skipped_count > 0:
+            msg += f"\n(Skipped {skipped_count} guild(s) with tracked members)"
+        if failed:
+            msg += f"\n\n❌ Failed ({len(failed)}):\n" + "\n".join(f"• {f}" for f in failed[:5])
+            if len(failed) > 5:
+                msg += f"\n... and {len(failed) - 5} more"
+        
+        await interaction.edit_original_response(content=msg)
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ [ERROR] {str(e)}")
+
 @bot.tree.command(name="claim", description="Link a Minecraft username to your Discord account")
 @discord.app_commands.describe(ign="Minecraft IGN")
 async def claim(interaction: discord.Interaction, ign: str):
@@ -9014,19 +9406,20 @@ async def ww(interaction: discord.Interaction, ign: str = None):
     skin_task = asyncio.to_thread(get_player_body, ign)
     (status_text, status_color), skin_image = await asyncio.gather(status_task, skin_task)
     
-    view = WWStatsView(all_data, ign, int(level), icon, 
-                       ign_color=ign_color, guild_tag=guild_tag, guild_hex=guild_hex,
-                       status_text=status_text, status_color=status_color, skin_image=skin_image)
-    
     # Check if tracked (UUID-aware)
     is_tracked = is_tracked_user(ign)
+    
+    view = WWStatsView(all_data, ign, int(level), icon, 
+                       ign_color=ign_color, guild_tag=guild_tag, guild_hex=guild_hex,
+                       status_text=status_text, status_color=status_color, skin_image=skin_image,
+                       show_period_buttons=is_tracked)
     
     file = view.generate_composite_image("all-time")
     if is_tracked:
         await interaction.followup.send(file=file, view=view)
     else:
         msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
-        await interaction.followup.send(content=msg, file=file)
+        await interaction.followup.send(content=msg, file=file, view=view)
         # Register user in database for leaderboard accuracy (but don't actively track)
         register_user(ign)
 
@@ -9324,6 +9717,37 @@ CATEGORY_METRICS = {
         "ww_engineer_kd_ratio": "Engineer K/D Ratio",
         "ww_engineer_assists_per_death": "Engineer Assists per Death",
         "ww_engineer_kill_assist_ratio": "Engineer Kill/Assist Ratio",
+    },
+    "guild": {
+        "GENERAL": "Total Guild Experience",
+        "WOOL_GAMES": "Wool Games",
+        "BATTLEGROUND": "Battleground",
+        "VAMPIREZ": "VampireZ",
+        "HOUSING": "Housing",
+        "WALLS": "Walls",
+        "SKYWARS": "SkyWars",
+        "TNTGAMES": "TNT Games",
+        "DUELS": "Duels",
+        "UHC": "UHC",
+        "ARCADE": "Arcade",
+        "MURDER_MYSTERY": "Murder Mystery",
+        "PIT": "Pit",
+        "BUILD_BATTLE": "Build Battle",
+        "MCGO": "Cops and Crims",
+        "PAINTBALL": "Paintball",
+        "SUPER_SMASH": "Super Smash",
+        "WALLS3": "Mega Walls",
+        "PROTOTYPE": "Prototype",
+        "ARENA": "Arena",
+        "SKYBLOCK": "SkyBlock",
+        "SURVIVAL_GAMES": "Blitz SG",
+        "QUAKECRAFT": "Quakecraft",
+        "BEDWARS": "Bed Wars",
+        "GINGERBREAD": "Gingerbread",
+        "LEGACY": "Legacy",
+        "SPEED_UHC": "Speed UHC",
+        "REPLAY": "Replay",
+        "SMP": "SMP",
     }
 }
 
@@ -9374,6 +9798,17 @@ async def ww_metric_autocomplete(interaction: discord.Interaction, current: str)
     ]
     return matches[:25]
 
+async def guild_metric_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for guild experience metrics."""
+    metrics = CATEGORY_METRICS.get("guild", {})
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=f"{display_name}", value=key)
+        for key, display_name in metrics.items()
+        if current_lower in key.lower() or current_lower in display_name.lower()
+    ]
+    return matches[:25]
+
 @leaderboard_group.command(name="general", description="View general stats leaderboards")
 @discord.app_commands.describe(metric="Choose a stat to rank players by")
 @discord.app_commands.autocomplete(metric=general_metric_autocomplete)
@@ -9401,6 +9836,13 @@ async def leaderboard_ctw(interaction: discord.Interaction, metric: str):
 async def leaderboard_ww(interaction: discord.Interaction, metric: str):
     """Wool Wars stats leaderboard."""
     await _handle_leaderboard(interaction, "ww", metric)
+
+@leaderboard_group.command(name="guild", description="View guild experience leaderboards")
+@discord.app_commands.describe(stat="Choose a game type to rank guilds by")
+@discord.app_commands.autocomplete(stat=guild_metric_autocomplete)
+async def leaderboard_guild(interaction: discord.Interaction, stat: str):
+    """Guild experience leaderboard."""
+    await _handle_guild_leaderboard(interaction, stat)
 
 # Add the leaderboard group to the bot
 bot.tree.add_command(leaderboard_group)
@@ -10058,6 +10500,380 @@ async def _handle_leaderboard(interaction: discord.Interaction, category: str, m
             await interaction.followup.send(embed=embed, view=view)
     except Exception as e:
         await interaction.followup.send(f"❌ [ERROR] {str(e)}")
+
+
+async def _handle_guild_leaderboard(interaction: discord.Interaction, game: str):
+    """Handler for guild experience leaderboard commands."""
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
+    
+    try:
+        available_games = CATEGORY_METRICS.get("guild", {})
+        
+        # Validate game
+        if game not in available_games:
+            game_list = "\n".join([f"• {k}: {v}" for k, v in available_games.items()])
+            await interaction.followup.send(
+                f"❌ Invalid game type '{game}'.\n\n"
+                f"**Available game types:**\n{game_list}"
+            )
+            return
+        
+        # Load guild data from database
+        processed_data = await asyncio.to_thread(_load_guild_leaderboard_data, game)
+        view = GuildLeaderboardView(game, processed_data)
+        
+        embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
+        if file:
+            await interaction.followup.send(view=view, file=file)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
+    except Exception as e:
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}")
+
+
+def _load_guild_leaderboard_data(game: str) -> dict:
+    """Load guild leaderboard data for a specific game type.
+    
+    Returns dict with period keys mapping to sorted lists of (guild_name, exp_value, tag, tag_color) tuples.
+    Values are DELTAS (lifetime - snapshot) except for lifetime which is the actual lifetime value.
+    Only tracked guilds (is_tracked=1) appear in delta-based periods; all guilds appear in lifetime.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Get all guilds' data for this game along with tag info and tracking status from tracked_guilds
+        cursor.execute('''
+            SELECT g.name, g.exp, g.lifetime, g.session, g.daily, g.yesterday, g.weekly, g.monthly,
+                   t.guild_tag, t.guild_hex, COALESCE(t.is_tracked, 0) as is_tracked
+            FROM gexp g
+            LEFT JOIN tracked_guilds t ON g.name = t.name
+            WHERE g.game = ?
+            ORDER BY g.lifetime DESC
+        ''', (game,))
+        
+        rows = cursor.fetchall()
+        
+        # Organize by period
+        periods = ["lifetime", "session", "daily", "yesterday", "weekly", "monthly"]
+        result = {period: [] for period in periods}
+        
+        for row in rows:
+            guild_name = row['name']
+            guild_tag = row['guild_tag']
+            guild_tag_color = row['guild_hex']
+            lifetime_value = row['lifetime']
+            is_tracked = row['is_tracked'] == 1
+            
+            # Calculate deltas for each period (like player stats)
+            period_values = {
+                'lifetime': lifetime_value,  # Lifetime is absolute value
+                'session': lifetime_value - row['session'],  # Delta since session start
+                'daily': lifetime_value - row['daily'],  # Delta since daily reset
+                'yesterday': row['daily'] - row['yesterday'],  # Yesterday's delta
+                'weekly': lifetime_value - row['weekly'],  # Delta since weekly reset
+                'monthly': lifetime_value - row['monthly']  # Delta since monthly reset
+            }
+            
+            # Debug output for first guild
+            if guild_name == rows[0]['name']:
+                print(f"[DEBUG] Guild: {guild_name} ({game}) - Tracked: {is_tracked}")
+                print(f"[DEBUG]   Lifetime: {lifetime_value}")
+                print(f"[DEBUG]   Snapshots - S:{row['session']} D:{row['daily']} Y:{row['yesterday']} W:{row['weekly']} M:{row['monthly']}")
+                print(f"[DEBUG]   Deltas - S:{period_values['session']} D:{period_values['daily']} Y:{period_values['yesterday']} W:{period_values['weekly']} M:{period_values['monthly']}")
+            
+            for period in periods:
+                value = period_values[period]
+                
+                # For delta-based periods, only include tracked guilds
+                # For lifetime, include all guilds
+                if period == "lifetime":
+                    if value > 0 or period == "lifetime":
+                        result[period].append((guild_name, value, guild_tag, guild_tag_color))
+                else:
+                    # Delta-based periods: only tracked guilds
+                    if is_tracked and value > 0:
+                        result[period].append((guild_name, value, guild_tag, guild_tag_color))
+        
+        # Sort each period by value descending
+        for period in periods:
+            result[period].sort(key=lambda x: x[1], reverse=True)
+        
+        return result
+
+
+class GuildLeaderboardPeriodSelect(discord.ui.Select):
+    def __init__(self, parent_view):
+        self.parent_view = parent_view
+        options = [
+            discord.SelectOption(label="Lifetime", value="lifetime", default=True),
+            discord.SelectOption(label="Session", value="session"),
+            discord.SelectOption(label="Daily", value="daily"),
+            discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Weekly", value="weekly"),
+            discord.SelectOption(label="Monthly", value="monthly"),
+        ]
+        super().__init__(placeholder="Select time period...", options=options, row=0)
+    
+    async def callback(self, interaction: discord.Interaction):
+        period = self.values[0]
+        self.parent_view.current_period = period
+        
+        # Update default selection
+        for option in self.options:
+            option.default = (option.value == period)
+        
+        embed, file, _ = self.parent_view.generate_leaderboard_image(period, self.parent_view.page)
+        if file:
+            await interaction.response.edit_message(attachments=[file], view=self.parent_view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class GuildLeaderboardView(discord.ui.View):
+    def __init__(self, game: str, data_cache: dict):
+        super().__init__()
+        self.game = game
+        self.data_cache = data_cache
+        self.current_period = "lifetime"
+        self.page = 0
+        self.page_size = 10
+        
+        # Game display names
+        self.game_labels = CATEGORY_METRICS.get("guild", {})
+        self.game_display = self.game_labels.get(game, game)
+        
+        # Period selector dropdown
+        self.period_select = GuildLeaderboardPeriodSelect(self)
+        self.add_item(self.period_select)
+        
+        # Navigation buttons
+        self.prev_button = discord.ui.Button(label="◀ Previous", style=discord.ButtonStyle.primary, row=1)
+        self.prev_button.callback = self.prev_page_callback
+        self.add_item(self.prev_button)
+        
+        self.next_button = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.primary, row=1)
+        self.next_button.callback = self.next_page_callback
+        self.add_item(self.next_button)
+        
+        # Search button
+        self.search_button = discord.ui.Button(label="🔍 Search", style=discord.ButtonStyle.secondary, row=1)
+        self.search_button.callback = self.search_callback
+        self.add_item(self.search_button)
+    
+    def _get_leaderboard(self, period: str):
+        return self.data_cache.get(period, [])
+    
+    def _paginate(self, leaderboard: list, page: int):
+        total_pages = max(1, (len(leaderboard) + self.page_size - 1) // self.page_size)
+        clamped_page = max(0, min(page, total_pages - 1))
+        start_index = clamped_page * self.page_size
+        return leaderboard[start_index:start_index + self.page_size], total_pages, clamped_page, start_index
+    
+    def generate_leaderboard_image(self, period: str, page: int):
+        leaderboard = self._get_leaderboard(period)
+        
+        if not leaderboard:
+            empty_embed = self.get_leaderboard_embed(period, page=0, total_pages=1, leaderboard=leaderboard)
+            return empty_embed, None, 1
+        
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard, page)
+        self.page = clamped_page
+        
+        # Format data for image generation
+        # For guilds: (rank, guild_name, level=0, icon="", name_hex, guild_tag, guild_tag_hex, value, is_playtime=False)
+        
+        image_data = []
+        for idx, entry in enumerate(sliced):
+            rank = start_index + idx + 1
+            
+            # Unpack based on whether we have tag data
+            if len(entry) == 4:
+                guild_name, exp_value, guild_tag, guild_tag_color = entry
+            elif len(entry) == 2:
+                guild_name, exp_value = entry
+                guild_tag, guild_tag_color = None, None
+            else:
+                # Fallback for unexpected format
+                guild_name = str(entry[0])
+                exp_value = entry[1] if len(entry) > 1 else 0
+                guild_tag = None
+                guild_tag_color = None
+            
+            # Debug output
+            if idx == 0:  # Only print first entry to avoid spam
+                print(f"[DEBUG] Guild leaderboard entry: name={guild_name}, tag={guild_tag}, color={guild_tag_color}, exp={exp_value}")
+            
+            # Convert tag color name to hex using Minecraft color mapping
+            if guild_tag_color:
+                tag_hex = MINECRAFT_NAME_TO_HEX.get(guild_tag_color.upper(), "#AAAAAA")
+            else:
+                tag_hex = "#AAAAAA"
+            
+            # No prestige for guilds, name shown in white, tag with its color
+            image_data.append((rank, guild_name, 0, "", "#FFFFFF", guild_tag or "", tag_hex, exp_value, False))
+        
+        if Image is not None:
+            try:
+                title_with_period = f"{period.title()} Guild {self.game_display}"
+                img_io = create_leaderboard_image(title_with_period, "Experience", image_data, page=clamped_page, total_pages=total_pages)
+                filename = f"guild_leaderboard_{self.game}_{period}_p{clamped_page + 1}.png"
+                return None, discord.File(img_io, filename=filename), total_pages
+            except Exception as e:
+                print(f"[WARNING] Guild leaderboard image generation failed: {e}")
+                import traceback
+                traceback.print_exc()
+                return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
+        else:
+            return self.get_leaderboard_embed(period, clamped_page, total_pages, leaderboard), None, total_pages
+    
+    def get_leaderboard_embed(self, period: str, page: int = 0, total_pages: int = 1, leaderboard: Optional[list] = None):
+        leaderboard_data = self._get_leaderboard(period) if leaderboard is None else leaderboard
+        
+        if not leaderboard_data:
+            embed = discord.Embed(
+                title=f"{period.title()} Guild {self.game_display} Leaderboard",
+                description="No data available",
+                color=discord.Color.from_rgb(54, 57, 63)
+            )
+            return embed
+        
+        sliced, total_pages, clamped_page, start_index = self._paginate(leaderboard_data, page)
+        
+        # Build leaderboard text
+        lines = []
+        for idx, entry in enumerate(sliced):
+            rank = start_index + idx + 1
+            
+            # Unpack based on whether we have tag data
+            if len(entry) == 4:
+                guild_name, exp_value, guild_tag, guild_tag_color = entry
+            elif len(entry) == 2:
+                guild_name, exp_value = entry
+                guild_tag = None
+            else:
+                guild_name = str(entry[0])
+                exp_value = entry[1] if len(entry) > 1 else 0
+                guild_tag = None
+            
+            # Format rank emoji
+            if rank == 1:
+                rank_emoji = "🥇"
+            elif rank == 2:
+                rank_emoji = "🥈"
+            elif rank == 3:
+                rank_emoji = "🥉"
+            else:
+                rank_emoji = f"`#{rank:>2}`"
+            
+            # Format exp value
+            exp_str = f"{exp_value:,.0f}"
+            
+            # Build display name with tag if available
+            display_name = f"**{guild_name}**"
+            if guild_tag:
+                display_name += f" [{guild_tag}]"
+            
+            lines.append(f"{rank_emoji} {display_name} - {exp_str} exp")
+        
+        description = "\n".join(lines)
+        
+        embed = discord.Embed(
+            title=f"{period.title()} Guild {self.game_display} Leaderboard",
+            description=description,
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Page {clamped_page + 1}/{total_pages} • {len(leaderboard_data)} guilds")
+        
+        return embed
+    
+    async def prev_page_callback(self, interaction: discord.Interaction):
+        self.page = max(0, self.page - 1)
+        embed, file, _ = self.generate_leaderboard_image(self.current_period, self.page)
+        if file:
+            await interaction.response.edit_message(attachments=[file], view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def next_page_callback(self, interaction: discord.Interaction):
+        leaderboard = self._get_leaderboard(self.current_period)
+        total_pages = max(1, (len(leaderboard) + self.page_size - 1) // self.page_size)
+        self.page = min(total_pages - 1, self.page + 1)
+        embed, file, _ = self.generate_leaderboard_image(self.current_period, self.page)
+        if file:
+            await interaction.response.edit_message(attachments=[file], view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def search_callback(self, interaction: discord.Interaction):
+        modal = GuildSearchModal(self)
+        await interaction.response.send_modal(modal)
+
+
+class GuildSearchModal(discord.ui.Modal, title="Search Guild Leaderboard"):
+    def __init__(self, parent_view):
+        super().__init__()
+        self.parent_view = parent_view
+        
+        self.search_input = discord.ui.TextInput(
+            label="Guild Name or Position",
+            placeholder="Enter guild name or position number (e.g., '5' or 'GS 2077')",
+            style=discord.TextStyle.short,
+            required=True
+        )
+        self.add_item(self.search_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        search_term = self.search_input.value.strip()
+        leaderboard = self.parent_view._get_leaderboard(self.parent_view.current_period)
+        
+        # Try parsing as position number first
+        try:
+            position = int(search_term)
+            if 1 <= position <= len(leaderboard):
+                # Jump to the page containing this position
+                page = (position - 1) // self.parent_view.page_size
+                self.parent_view.page = page
+                embed, file, _ = self.parent_view.generate_leaderboard_image(self.parent_view.current_period, page)
+                if file:
+                    await interaction.response.edit_message(attachments=[file], view=self.parent_view)
+                else:
+                    await interaction.response.edit_message(embed=embed, view=self.parent_view)
+                return
+            else:
+                await interaction.response.send_message(
+                    f"❌ Position {position} is out of range (1-{len(leaderboard)}).",
+                    ephemeral=True
+                )
+                return
+        except ValueError:
+            # Not a number, search by guild name
+            pass
+        
+        # Search for guild name
+        search_lower = search_term.lower()
+        for idx, entry in enumerate(leaderboard):
+            # Handle both old format (2 elements) and new format (4 elements)
+            guild_name = entry[0]
+            if search_lower in guild_name.lower():
+                # Found guild - jump to its page
+                page = idx // self.parent_view.page_size
+                self.parent_view.page = page
+                embed, file, _ = self.parent_view.generate_leaderboard_image(self.parent_view.current_period, page)
+                if file:
+                    await interaction.response.edit_message(attachments=[file], view=self.parent_view)
+                else:
+                    await interaction.response.edit_message(embed=embed, view=self.parent_view)
+                return
+        
+        # Guild not found
+        await interaction.response.send_message(
+            f"❌ Guild '{search_term}' not found in {self.parent_view.current_period} leaderboard.",
+            ephemeral=True
+        )
 
 
 def calculate_carried_score_average(wins, losses, kills, deaths, games_played):

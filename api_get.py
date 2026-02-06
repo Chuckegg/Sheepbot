@@ -537,7 +537,7 @@ def get_rank_color(rank: Optional[str]) -> str:
     return rank_colors.get(rank_upper, "#FFFFFF")  # Default to white
 
 
-def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Optional[str] = None, guild_color: Optional[str] = None):
+def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Optional[str] = None, guild_color: Optional[str] = None, guild_name: Optional[str] = None):
     """Save or update user's rank and guild info in database.
     
     Only assigns color automatically for NEW users based on their rank.
@@ -557,14 +557,16 @@ def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Opti
         update_user_meta(username_key,
                         rank=rank,
                         guild_tag=guild_tag,
-                        guild_hex=guild_color)
+                        guild_hex=guild_color,
+                        guild_name=guild_name)
     else:
         # NEW USER - do not set ign_color, let it default to NULL so rank color is used dynamically
         print(f"[DEBUG] NEW USER {username} - saving rank {rank}, guild: {guild_tag}")
         update_user_meta(username_key,
                         rank=rank,
                         guild_tag=guild_tag,
-                        guild_hex=guild_color)
+                        guild_hex=guild_color,
+                        guild_name=guild_name)
 
 
 def api_update_database(username: str, api_key: str, snapshot_sections: set[str] | None = None):
@@ -721,6 +723,7 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
 
     # Fetch guild information
     print(f"[DEBUG] Fetching guild information for {proper_username} (UUID: {uuid})")
+    guild_name = None
     try:
         guild_data = get_hypixel_guild(uuid, api_key)
         # Save guild data to file for inspection
@@ -729,6 +732,10 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
             json.dump(guild_data, f, indent=2)
         print(f"[DEBUG] Guild data saved to guild_info.json")
         guild_tag, guild_color = extract_guild_info(guild_data)
+        # Extract guild name
+        if guild_data.get("success") and guild_data.get("guild"):
+            guild_name = guild_data["guild"].get("name")
+            print(f"[DEBUG] Extracted guild name: {guild_name}")
         print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
@@ -744,7 +751,19 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
     # Extract and save player rank and guild info to database
     rank = extract_player_rank(data)
     print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
-    save_user_color_and_rank(proper_username, rank, guild_tag, guild_color)
+    save_user_color_and_rank(proper_username, rank, guild_tag, guild_color, guild_name)
+
+    # If player is in a guild, fetch and update guild exp stats to auto-register the guild
+    if guild_name and guild_tag:
+        print(f"[DEBUG] Player is in guild '{guild_name}', fetching guild exp stats...")
+        try:
+            guild_result = api_update_guild_database(guild_name, api_key)
+            if 'error' not in guild_result:
+                print(f"[DEBUG] Successfully auto-registered guild '{guild_name}' with tag [{guild_tag}]")
+            else:
+                print(f"[DEBUG] Failed to fetch guild exp: {guild_result.get('error')}")
+        except Exception as guild_err:
+            print(f"[DEBUG] Failed to auto-register guild '{guild_name}': {guild_err}")
 
     # Determine which stat categories are NEW for this user
     new_stat_categories = set()
@@ -798,6 +817,94 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
         "database": "stats.db",
         "username": proper_username
     }
+
+
+def get_hypixel_guild_by_name(guild_name: str, api_key: str) -> Dict:
+    """Fetch guild information by guild name from Hypixel API.
+    
+    Args:
+        guild_name: Name of the guild
+        api_key: Hypixel API key
+        
+    Returns:
+        Guild data dictionary
+    """
+    r = requests.get(
+        "https://api.hypixel.net/v2/guild",
+        headers={"API-Key": api_key},
+        params={"name": guild_name},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def api_update_guild_database(guild_name: str, api_key: str, snapshot_sections: set[str] | None = None):
+    """Update guild experience stats in database from Hypixel API.
+    
+    Args:
+        guild_name: Guild name
+        api_key: Hypixel API key
+        snapshot_sections: Set of periods to snapshot ("session", "daily", "yesterday", "weekly", "monthly")
+        
+    Returns:
+        Dict with update results
+    """
+    from db_helper import update_guild_exp
+    
+    try:
+        # Ensure database exists
+        init_database()
+        
+        # Get guild data from Hypixel
+        data = get_hypixel_guild_by_name(guild_name, api_key)
+        
+        if not data.get("success"):
+            raise ValueError(f"API returned success=False for guild '{guild_name}'")
+        
+        guild = data.get("guild")
+        if not guild:
+            raise ValueError(f"Guild '{guild_name}' not found")
+        
+        # Get the proper guild name from API response
+        proper_name = guild.get("name", guild_name)
+        
+        # Extract guild tag and color
+        guild_tag = guild.get("tag", "")
+        guild_tag_color = guild.get("tagColor", "")
+        
+        # Extract guild experience data
+        game_exp_data = {}
+        
+        # Add GENERAL (overall guild exp)
+        general_exp = guild.get("exp", 0)
+        game_exp_data["GENERAL"] = float(general_exp)
+        
+        # Add individual game type exp
+        guild_exp_by_game = guild.get("guildExpByGameType", {})
+        for game_type, exp_value in guild_exp_by_game.items():
+            game_exp_data[game_type] = float(exp_value)
+        
+        # Update database with tag and color
+        update_guild_exp(proper_name, game_exp_data, snapshot_sections, guild_tag, guild_tag_color)
+        
+        print(f"[DB] Successfully updated guild '{proper_name}' with tag '{guild_tag}'")
+        
+        return {
+            "guild_name": proper_name,
+            "guild_tag": guild_tag,
+            "guild_tag_color": guild_tag_color,
+            "games": list(game_exp_data.keys()),
+            "total_exp": general_exp,
+            "database": "stats.db"
+        }
+        
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        print(f"[ERROR] Failed to update guild '{guild_name}': {e}")
+        return {
+            "error": str(e),
+            "guild_name": guild_name
+        }
 
 
 def main():
