@@ -8649,11 +8649,15 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                 # Check for specific error types
                 user_msg = None
                 if "never played" in full_output.lower() or "no wool games data" in full_output.lower():
-                    user_msg = f"The player `{ign}` has no Wool Games statistics. They may have never played Sheep Wars, CTW, or Wool Wars on Hypixel."
+                    await interaction.followup.send(
+                        f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
+                    )
+                    return
                 elif error_details:
                     # Parse the error details for user-friendly message
                     if "403" in error_details or "Forbidden" in error_details:
-                        user_msg = f"The Hypixel API denied access (403 Forbidden). This might be due to an invalid API key or the API temporarily blocking requests.\n\n**Technical details:** {error_details}"
+                        await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
+                        return
                     elif "429" in error_details or "Rate" in error_details:
                         user_msg = f"Too many requests to the Hypixel API. Please wait a moment and try again.\n\n**Technical details:** {error_details}"
                     elif "404" in error_details:
@@ -8692,7 +8696,8 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                     reason = json_data.get("reason", "unknown")
                     
                     if "403" in error_msg or "Forbidden" in error_msg:
-                        user_msg = f"The Hypixel API denied access (403 Forbidden). This might be due to an invalid API key.\n\n**Technical details:** {error_msg}"
+                        await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
+                        return
                     elif reason == "api_error":
                         user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
                     else:
@@ -8732,12 +8737,10 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                 break
         
         if not user_data:
-            await send_error_with_report(
-                interaction,
-                f"Unable to find statistics for player `{ign}`. This could mean they have no Wool Games data or there was an issue fetching their information.",
-                f"Player '{ign}' not found in cache after api_get.py execution",
-                "/stats",
-                f"IGN: {ign}"
+            # Check if this is because they have no Wool Games data
+            # This can happen if api_get ran but the player has no stats
+            await interaction.followup.send(
+                f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
             )
             return
 
@@ -9595,6 +9598,35 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
                         except json.JSONDecodeError:
                             continue
                 
+                # Check if the API request was skipped due to an error
+                if json_data and json_data.get("skipped"):
+                    error_msg = json_data.get("error", "Unknown error")
+                    reason = json_data.get("reason", "unknown")
+                    stdout_msg = result.stdout or ""
+                    stderr_msg = result.stderr or ""
+                    full_output = f"STDOUT:\n{stdout_msg}\n\nSTDERR:\n{stderr_msg}"
+                    
+                    if "403" in error_msg or "Forbidden" in error_msg:
+                        await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
+                        return
+                    elif "429" in error_msg or "Rate" in error_msg:
+                        user_msg = f"Too many requests to the Hypixel API. Please wait a moment and try again.\n\n**Technical details:** {error_msg}"
+                    elif "404" in error_msg:
+                        user_msg = f"Player `{ign}` not found on Hypixel.\n\n**Technical details:** {error_msg}"
+                    elif reason == "api_error":
+                        user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
+                    else:
+                        user_msg = f"Unable to fetch data for `{ign}`.\n\n**Technical details:** {error_msg}"
+                    
+                    await send_error_with_report(
+                        interaction,
+                        user_msg,
+                        full_output,
+                        "/sheepwars",
+                        f"IGN: {ign}"
+                    )
+                    return
+                
                 if json_data and "processed_stats" in json_data and "username" in json_data:
                     user_data = await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
                     ign = json_data["username"]
@@ -9606,12 +9638,8 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
             print(f"[ERROR] api_get failed for {ign} in sheepwars: {error_msg}")
 
     if not user_data:
-        await send_error_with_report(
-            interaction,
-            f"Unable to find statistics for player `{ign}`. They may have no Wool Games data or never played on Hypixel.",
-            "Player not found in database after attempting API fetch",
-            "/sheepwars",
-            f"IGN: {ign}"
+        await interaction.followup.send(
+            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
         )
         return
 
