@@ -3877,7 +3877,7 @@ class StatsTabView(discord.ui.View):
     def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, 
                  ign_color: str = None, guild_tag: str = None, guild_hex: str = None,
                  status_text="Online", status_color=(85, 255, 85), skin_image=None):
-        super().__init__()
+        super().__init__(timeout=180)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.data = data_dict 
         self.ign = ign
         self.level_value = level_value
@@ -3886,6 +3886,7 @@ class StatsTabView(discord.ui.View):
         self.status_color = status_color
         self.skin_image = skin_image
         self.current_tab = "all-time"
+        self.message = None  # Store message reference for timeout handling
         
         self.ign_color = ign_color
         self.guild_tag = guild_tag
@@ -3895,6 +3896,14 @@ class StatsTabView(discord.ui.View):
             self._load_color()
             
         self.update_button_styles()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def _load_color(self):
         try:
@@ -3968,7 +3977,7 @@ class WWStatsView(discord.ui.View):
                  ign_color: str = None, guild_tag: str = None, guild_hex: str = None,
                  status_text="Online", status_color=(85, 255, 85), skin_image=None, 
                  show_period_buttons: bool = True):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.data = data_dict 
         self.ign = ign
         self.level_value = level_value
@@ -3979,6 +3988,7 @@ class WWStatsView(discord.ui.View):
         self.current_tab = "all-time"
         self.current_class = "overall"
         self.show_period_buttons = show_period_buttons
+        self.message = None  # Store message reference for timeout handling
         
         self.ign_color = ign_color
         self.guild_tag = guild_tag
@@ -3999,6 +4009,14 @@ class WWStatsView(discord.ui.View):
         self.add_item(self.class_selector)
         
         self.update_button_styles()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def _load_color(self):
         try:
@@ -4123,7 +4141,7 @@ class CTWStatsView(discord.ui.View):
     def __init__(self, data_dict, ign, level_value: int, prestige_icon: str, 
                  ign_color: str = None, guild_tag: str = None, guild_hex: str = None,
                  status_text="Online", status_color=(85, 255, 85), skin_image=None):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.data = data_dict 
         self.ign = ign
         self.level_value = level_value
@@ -4132,6 +4150,7 @@ class CTWStatsView(discord.ui.View):
         self.status_color = status_color
         self.skin_image = skin_image
         self.current_tab = "all-time"
+        self.message = None  # Store message reference for timeout handling
         
         self.ign_color = ign_color
         self.guild_tag = guild_tag
@@ -4141,6 +4160,14 @@ class CTWStatsView(discord.ui.View):
             self._load_color()
             
         self.update_button_styles()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def _load_color(self):
         try:
@@ -4231,14 +4258,23 @@ class CTWStatsView(discord.ui.View):
 # Extended stats view (Template.xlsx layout)
 class StatsFullView(discord.ui.View):
     def __init__(self, user_data, ign: str):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign = ign
         self.user_data = user_data
         self.meta = user_data.get("meta", {})
         self.current_tab = "all-time"
+        self.message = None  # Store message reference for timeout handling
         self._load_color()
         
         self.update_buttons()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def _load_color(self):
         """Load or reload the color and guild info for this username from database"""
@@ -4464,7 +4500,7 @@ class StatsFullView(discord.ui.View):
 
 class CompareView(discord.ui.View):
     def __init__(self, user_data1, user_data2, ign1: str, ign2: str, stat: str = None):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign1 = ign1
         self.ign2 = ign2
         self.user_data1 = user_data1
@@ -4473,9 +4509,18 @@ class CompareView(discord.ui.View):
         self.meta2 = user_data2.get("meta", {})
         self.current_tab = "all-time"
         self.stat = stat  # Single stat to compare, if specified
+        self.message = None  # Store message reference for timeout handling
         self._load_colors()
         
         self.update_buttons()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def _load_colors(self):
         """Load colors and guild info for both usernames from database"""
@@ -4777,12 +4822,20 @@ class CompareView(discord.ui.View):
 
 class DistributionView(discord.ui.View):
     def __init__(self, user_data, ign: str, mode: str):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign = ign
         self.user_data = user_data
         self.mode = mode  # 'kill' or 'death'
         self.current_tab = "all-time"
+        self.message = None  # Store message reference for timeout handling
         
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
         # Colors for legend slices
         self.slice_colors = {
             "void": (90, 155, 255),        # blue
@@ -5147,13 +5200,22 @@ class RatiosView(discord.ui.View):
     """View for displaying ratio milestone predictions with period tabs."""
     
     def __init__(self, user_data: dict, ign: str):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign = ign
         self.user_data = user_data
         self.meta = user_data.get("meta", {})
         self.current_tab = "all-time"
+        self.message = None  # Store message reference for timeout handling
         self._load_color()
         self.update_buttons()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
     
     def _load_color(self):
         """Load color and guild info for this username from database."""
@@ -5458,14 +5520,23 @@ class LevelProgressView(discord.ui.View):
     """View for displaying level progress predictions with period tabs."""
     
     def __init__(self, user_data: dict, ign: str, custom_level: int = None):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign = ign
         self.user_data = user_data
         self.meta = user_data.get("meta", {})
         self.current_tab = "all-time"
         self.custom_level = custom_level
+        self.message = None  # Store message reference for timeout handling
         self._load_color()
         self.update_buttons()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
     
     def _load_color(self):
         """Load color and guild info for this username from database."""
@@ -5608,13 +5679,14 @@ class LevelProgressView(discord.ui.View):
 
 class LeaderboardView(discord.ui.View):
     def __init__(self, metric: str, data_cache: dict, category: str = "sheepwars"):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.metric = metric
         self.data_cache = data_cache
         self.category = category
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        self.message = None  # Store message reference for timeout handling
         
         # Category display names
         self.category_names = {
@@ -5670,6 +5742,14 @@ class LeaderboardView(discord.ui.View):
         # Period selector dropdown
         self.period_select = LeaderboardPeriodSelect(self)
         self.add_item(self.period_select)
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
         
     def _get_leaderboard(self, period: str):
         return self.metric_labels[self.metric], self.data_cache.get(period, [])
@@ -6462,11 +6542,12 @@ def _process_ratio_data(cache_data, metric):
 
 class RatioLeaderboardView(discord.ui.View):
     def __init__(self, metric: str, data_cache: dict, category: str = "sheepwars"):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.metric = metric
         self.data_cache = data_cache
         self.category = category
         self.current_period = "lifetime"
+        self.message = None  # Store message reference for timeout handling
         self.page = 0
         self.page_size = 10
         
@@ -6520,6 +6601,14 @@ class RatioLeaderboardView(discord.ui.View):
         # Period selector dropdown
         self.period_select = RatioPeriodSelect(self)
         self.add_item(self.period_select)
+        
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
         
     def _get_leaderboard(self, period: str):
         return self.metric_labels[self.metric], self.data_cache.get(period, [])
@@ -6893,6 +6982,139 @@ def _register_pending_streak(user_id: int, ign: str, stats_snapshot: dict, view)
 
 def _pop_pending_streak(user_id: int):
     return PENDING_STREAKS.pop(user_id, None)
+
+
+# Error Reporting System
+class ErrorReportView(discord.ui.View):
+    """View for users to report errors to administrators."""
+    def __init__(self, error_details: str, command_name: str, user_info: str, context: str):
+        super().__init__(timeout=300)  # 5 minute timeout for error reporting
+        self.error_details = error_details
+        self.command_name = command_name
+        self.user_info = user_info
+        self.context = context
+        self.reported = False
+    
+    @discord.ui.button(label="📩 Report to Admins", style=discord.ButtonStyle.primary)
+    async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.reported:
+            await interaction.response.send_message("✅ This error has already been reported.", ephemeral=True)
+            return
+        
+        # Disable the button after reporting
+        self.reported = True
+        button.disabled = True
+        button.label = "✅ Reported"
+        button.style = discord.ButtonStyle.success
+        
+        # Send report to admins
+        admins = []
+        for admin_id in ADMIN_IDS:
+            try:
+                uid = int(admin_id)
+                user = interaction.client.get_user(uid) or await interaction.client.fetch_user(uid)
+                if user:
+                    admins.append(user)
+            except Exception:
+                pass
+        
+        report_embed = discord.Embed(
+            title="🚨 Error Report",
+            description=f"User {self.user_info} encountered an error",
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow()
+        )
+        report_embed.add_field(name="Command", value=f"`{self.command_name}`", inline=False)
+        report_embed.add_field(name="Context", value=self.context[:1024], inline=False)
+        report_embed.add_field(name="Error Details", value=f"```{self.error_details[:1000]}```", inline=False)
+        
+        sent_count = 0
+        for admin in admins:
+            try:
+                await admin.send(embed=report_embed)
+                sent_count += 1
+            except Exception:
+                pass
+        
+        if sent_count > 0:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        content="✅ Error reported to administrators. Thank you for helping improve the bot!",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.edit_message(
+                        content="✅ Error reported to administrators. Thank you for helping improve the bot!",
+                        view=self
+                    )
+            except (discord.errors.NotFound, discord.errors.HTTPException):
+                # Interaction expired, but report was sent successfully
+                pass
+        else:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        content="❌ Failed to send report to administrators. Please try again later or contact them directly.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.edit_message(
+                        content="❌ Failed to send report to administrators. Please try again later or contact them directly.",
+                        view=self
+                    )
+            except (discord.errors.NotFound, discord.errors.HTTPException):
+                pass
+
+
+async def send_error_with_report(
+    interaction: discord.Interaction,
+    user_message: str,
+    technical_details: str,
+    command_name: str,
+    context: str = "",
+    ephemeral: bool = False
+) -> None:
+    """
+    Send a user-friendly error message with a button to report the error to admins.
+    
+    Args:
+        interaction: The Discord interaction
+        user_message: User-friendly error message
+        technical_details: Technical error details for admin report
+        command_name: Name of the command that failed
+        context: Additional context (e.g., "IGN: player123")
+        ephemeral: Whether the message should be ephemeral
+    """
+    user_info = f"{interaction.user.name} ({interaction.user.id})"
+    
+    # Create error reporting view
+    view = ErrorReportView(
+        error_details=technical_details,
+        command_name=command_name,
+        user_info=user_info,
+        context=context
+    )
+    
+    # Send user-friendly message with report button
+    full_message = f"❌ {user_message}\n\n*If this problem persists, you can report it to the administrators using the button below.*"
+    
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content=full_message, view=view, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content=full_message, view=view, ephemeral=ephemeral)
+    except Exception as e:
+        print(f"[ERROR] Failed to send error message: {e}")
+        # Fallback to simple message if view fails
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(content=user_message, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(content=user_message, ephemeral=ephemeral)
+        except Exception:
+            pass
+
 
 # Bot token
 # Read from BOT_TOKEN.txt in the same directory
@@ -8131,20 +8353,32 @@ async def levelprogress(interaction: discord.Interaction, ign: str = None, level
         file = view.generate_level_progress_image("all-time")
         
         if is_tracked:
-            await interaction.followup.send(file=file, view=view)
+            message = await interaction.followup.send(file=file, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
-            message = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
-            await interaction.followup.send(content=message, file=file)
+            msg = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=msg, file=file)
             # Register user in database for leaderboard accuracy (but don't actively track)
             register_user(actual_ign)
     
     except subprocess.TimeoutExpired:
-        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+        await send_error_with_report(
+            interaction,
+            "The command took too long to complete.",
+            "Command timed out (30s limit)",
+            "/levelprogress",
+            f"IGN: {ign}, Level: {level}"
+        )
     except Exception as e:
-        print(f"[ERROR] /levelprogress exception: {e}")
         import traceback
-        traceback.print_exc()
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while generating level progress predictions.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/levelprogress",
+            f"IGN: {ign}, Level: {level}"
+        )
 
 
 @bot.tree.command(name="instructions", description="Display bot usage instructions")
@@ -8309,13 +8543,16 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
         except (discord.errors.NotFound, discord.errors.HTTPException):
             print(f"[REFRESH] Timeout error but interaction expired")
     except Exception as e:
-        print(f"[REFRESH] Exception: {e}")
         import traceback
-        traceback.print_exc()
-        try:
-            await interaction.followup.send(f"[ERROR] {str(e)}", ephemeral=True)
-        except (discord.errors.NotFound, discord.errors.HTTPException):
-            print(f"[REFRESH] Exception but interaction expired")
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while refreshing the cache.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/refresh",
+            "Cache refresh attempt",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="fixguilds", description="Admin: Force refresh all guild tags and colors")
 async def fixguilds(interaction: discord.Interaction):
@@ -8341,7 +8578,16 @@ async def fixguilds(interaction: discord.Interaction):
             await interaction.followup.send(f"❌ Guild repair failed:\n```{sanitize_output(err[:1000])}```", ephemeral=True)
             
     except Exception as e:
-        await interaction.followup.send(f"❌ Exception during guild repair: {str(e)}", ephemeral=True)
+        import traceback
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred during guild data repair.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/fixguilds",
+            "Admin command execution",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
@@ -8380,8 +8626,50 @@ async def stats(interaction: discord.Interaction, ign: str = None):
             if result.stderr and "429" in result.stderr:
                 print(f"[DEBUG] Rate limited for {ign} (/stats), attempting to use existing data")
             else:
-                error_msg = result.stderr or result.stdout or "Unknown error"
-                await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+                stdout_msg = result.stdout or ""
+                stderr_msg = result.stderr or ""
+                full_output = f"STDOUT:\n{stdout_msg}\n\nSTDERR:\n{stderr_msg}"
+                
+                # Try to parse JSON error from stdout
+                error_details = None
+                try:
+                    for line in reversed(stdout_msg.splitlines()):
+                        line = line.strip()
+                        if line.startswith('{') and line.endswith('}'):
+                            try:
+                                json_data = json.loads(line)
+                                if json_data.get("skipped") and json_data.get("error"):
+                                    error_details = json_data.get("error")
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                except Exception:
+                    pass
+                
+                # Check for specific error types
+                user_msg = None
+                if "never played" in full_output.lower() or "no wool games data" in full_output.lower():
+                    user_msg = f"The player `{ign}` has no Wool Games statistics. They may have never played Sheep Wars, CTW, or Wool Wars on Hypixel."
+                elif error_details:
+                    # Parse the error details for user-friendly message
+                    if "403" in error_details or "Forbidden" in error_details:
+                        user_msg = f"The Hypixel API denied access (403 Forbidden). This might be due to an invalid API key or the API temporarily blocking requests.\n\n**Technical details:** {error_details}"
+                    elif "429" in error_details or "Rate" in error_details:
+                        user_msg = f"Too many requests to the Hypixel API. Please wait a moment and try again.\n\n**Technical details:** {error_details}"
+                    elif "404" in error_details:
+                        user_msg = f"Player `{ign}` not found on Hypixel.\n\n**Technical details:** {error_details}"
+                    else:
+                        user_msg = f"API Error: {error_details}"
+                else:
+                    user_msg = "Failed to fetch player statistics. The Hypixel API may be unavailable or the player might not exist."
+                
+                await send_error_with_report(
+                    interaction,
+                    user_msg,
+                    full_output,
+                    "/stats",
+                    f"IGN: {ign}"
+                )
                 return
 
         # Optimistically update cache if we have JSON output
@@ -8397,6 +8685,27 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                             break
                         except json.JSONDecodeError:
                             continue
+                
+                # Check if the API request was skipped due to an error
+                if json_data and json_data.get("skipped"):
+                    error_msg = json_data.get("error", "Unknown error")
+                    reason = json_data.get("reason", "unknown")
+                    
+                    if "403" in error_msg or "Forbidden" in error_msg:
+                        user_msg = f"The Hypixel API denied access (403 Forbidden). This might be due to an invalid API key.\n\n**Technical details:** {error_msg}"
+                    elif reason == "api_error":
+                        user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
+                    else:
+                        user_msg = f"Unable to fetch data for `{ign}`.\n\n**Technical details:** {error_msg}"
+                    
+                    await send_error_with_report(
+                        interaction,
+                        user_msg,
+                        f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr or 'None'}",
+                        "/stats",
+                        f"IGN: {ign}"
+                    )
+                    return
                 
                 if json_data and "processed_stats" in json_data and "username" in json_data:
                     await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
@@ -8423,7 +8732,13 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                 break
         
         if not user_data:
-            await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+            await send_error_with_report(
+                interaction,
+                f"Unable to find statistics for player `{ign}`. This could mean they have no Wool Games data or there was an issue fetching their information.",
+                f"Player '{ign}' not found in cache after api_get.py execution",
+                "/stats",
+                f"IGN: {ign}"
+            )
             return
 
         # Check if user is tracked (UUID-aware)
@@ -8434,25 +8749,41 @@ async def stats(interaction: discord.Interaction, ign: str = None):
 
         if file:
             if is_tracked:
-                await interaction.followup.send(view=view, file=file)
+                message = await interaction.followup.send(view=view, file=file)
+                view.message = message  # Store message reference for timeout handling
             else:
-                message = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
-                await interaction.followup.send(content=message, file=file)
+                msg = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
+                await interaction.followup.send(content=msg, file=file)
                 # Register user in database for leaderboard accuracy (but don't actively track)
                 register_user(actual_ign)
         else:
             if is_tracked:
-                await interaction.followup.send(embed=embed, view=view)
+                message = await interaction.followup.send(embed=embed, view=view)
+                view.message = message  # Store message reference for timeout handling
             else:
-                message = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
-                await interaction.followup.send(content=message, embed=embed)
+                msg = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
+                await interaction.followup.send(content=msg, embed=embed)
                 # Register user in database for leaderboard accuracy (but don't actively track)
                 register_user(actual_ign)
 
     except subprocess.TimeoutExpired:
-        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+        await send_error_with_report(
+            interaction,
+            "The command took too long to complete. The Hypixel API might be slow or unresponsive.",
+            "Command timed out (30s limit)",
+            "/stats",
+            f"IGN: {ign}"
+        )
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while fetching stats. Please try again later.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/stats",
+            f"IGN: {ign}"
+        )
 
 
 @bot.tree.command(name="streak", description="View current win/kill streaks (approved users)")
@@ -8570,12 +8901,13 @@ class LayoutKitSelect(discord.ui.Select):
 class LayoutTabView(discord.ui.View):
     """View for hotbar layout display with game tabs."""
     def __init__(self, username, layouts):
-        super().__init__(timeout=180)
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.username = username
         self.layouts = layouts
         self.current_game = "sheep_wars"
         self.current_kit = None
         self.kit_selector = None
+        self.message = None  # Store message reference for timeout handling
         
         # Organize layouts by game
         self.game_layouts = {}
@@ -8594,6 +8926,14 @@ class LayoutTabView(discord.ui.View):
                 self.current_kit = non_null_kits[0]['kit']
         
         self.update_button_styles()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def update_button_styles(self):
         """Set active button to primary style, others to secondary."""
@@ -8746,12 +9086,14 @@ async def layout(interaction: discord.Interaction, ign: str):
             # Create view and edit the message with the data
             view = LayoutTabView(proper_ign, layouts)
             embed = view.format_layout_embed("sheep_wars")
-            await status_msg.edit(content=None, embed=embed, view=view)
+            message = await status_msg.edit(content=None, embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
             # Data already available
             view = LayoutTabView(proper_ign, layouts)
             embed = view.format_layout_embed("sheep_wars")
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
 
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
@@ -8892,9 +9234,10 @@ async def compare(interaction: discord.Interaction, ign1: str, ign2: str, stat: 
 
         if file:
             if warning_msg:
-                await interaction.followup.send(content=warning_msg, file=file, view=view)
+                message = await interaction.followup.send(content=warning_msg, file=file, view=view)
             else:
-                await interaction.followup.send(view=view, file=file)
+                message = await interaction.followup.send(view=view, file=file)
+            view.message = message  # Store message reference for timeout handling
         else:
             if warning_msg:
                 await interaction.followup.send(content=warning_msg, embed=embed, view=view)
@@ -8910,9 +9253,23 @@ async def compare(interaction: discord.Interaction, ign1: str, ign2: str, stat: 
             register_user(actual_ign2)
 
     except subprocess.TimeoutExpired:
-        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+        await send_error_with_report(
+            interaction,
+            "The command took too long to complete. The Hypixel API might be slow.",
+            "Command timed out (30s limit)",
+            "/compare",
+            f"Player 1: {ign1}, Player 2: {ign2}"
+        )
     except Exception as e:
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while comparing players.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/compare",
+            f"Player 1: {ign1}, Player 2: {ign2}"
+        )
 
 
 @bot.tree.command(name="killdistribution", description="View kill-type distribution as a pie chart")
@@ -8981,9 +9338,11 @@ async def killdistribution(interaction: discord.Interaction, ign: str = None):
         embed, file = view.generate_distribution("all-time")
 
         if file:
-            await interaction.followup.send(file=file, view=view)
+            message = await interaction.followup.send(file=file, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
     except Exception as e:
@@ -9056,9 +9415,11 @@ async def deathdistribution(interaction: discord.Interaction, ign: str = None):
         embed, file = view.generate_distribution("all-time")
 
         if file:
-            await interaction.followup.send(file=file, view=view)
+            message = await interaction.followup.send(file=file, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
     except Exception as e:
@@ -9150,20 +9511,32 @@ async def ratios(interaction: discord.Interaction, ign: str = None):
         file = view.generate_ratios_image("all-time")
         
         if is_tracked:
-            await interaction.followup.send(file=file, view=view)
+            message = await interaction.followup.send(file=file, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
-            message = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
-            await interaction.followup.send(content=message, file=file)
+            msg = f"`{actual_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{actual_ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=msg, file=file)
             # Register user in database for leaderboard accuracy (but don't actively track)
             register_user(actual_ign)
     
     except subprocess.TimeoutExpired:
-        await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+        await send_error_with_report(
+            interaction,
+            "The command took too long to complete.",
+            "Command timed out (30s limit)",
+            "/ratios",
+            f"IGN: {ign}"
+        )
     except Exception as e:
-        print(f"[ERROR] /ratios exception: {e}")
         import traceback
-        traceback.print_exc()
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while calculating ratio predictions.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/ratios",
+            f"IGN: {ign}"
+        )
 
 @bot.tree.command(name="sheepwars", description="Get player stats with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
@@ -9229,10 +9602,17 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
                 print(f"[WARNING] Failed to parse api_get output in sheepwars: {e}")
         elif result.returncode != 0:
             # If api_get failed, log it and potentially inform user
-            print(f"[ERROR] api_get failed for {ign} in sheepwars: {result.stderr}")
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            print(f"[ERROR] api_get failed for {ign} in sheepwars: {error_msg}")
 
     if not user_data:
-        await interaction.followup.send("Player not found in database or API error.")
+        await send_error_with_report(
+            interaction,
+            f"Unable to find statistics for player `{ign}`. They may have no Wool Games data or never played on Hypixel.",
+            "Player not found in database after attempting API fetch",
+            "/sheepwars",
+            f"IGN: {ign}"
+        )
         return
 
     # Build all_data from cache
@@ -9284,7 +9664,8 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
     
     file = view.generate_composite_image("all-time")
     if is_tracked:
-        await interaction.followup.send(file=file, view=view)
+        message = await interaction.followup.send(file=file, view=view)
+        view.message = message  # Store message reference for timeout handling
     else:
         msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
         await interaction.followup.send(content=msg, file=file)
@@ -9417,10 +9798,12 @@ async def ww(interaction: discord.Interaction, ign: str = None):
     
     file = view.generate_composite_image("all-time")
     if is_tracked:
-        await interaction.followup.send(file=file, view=view)
+        message = await interaction.followup.send(file=file, view=view)
+        view.message = message  # Store message reference for timeout handling
     else:
         msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
-        await interaction.followup.send(content=msg, file=file, view=view)
+        message = await interaction.followup.send(content=msg, file=file, view=view)
+        view.message = message  # Store message reference for timeout handling
         # Register user in database for leaderboard accuracy (but don't actively track)
         register_user(ign)
 
@@ -9564,7 +9947,8 @@ async def ctw(interaction: discord.Interaction, ign: str = None):
     
     file = view.generate_composite_image("all-time")
     if is_tracked:
-        await interaction.followup.send(file=file, view=view)
+        message = await interaction.followup.send(file=file, view=view)
+        view.message = message  # Store message reference for timeout handling
     else:
         msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
         await interaction.followup.send(content=msg, file=file)
@@ -10209,7 +10593,7 @@ class RankingsTabView(discord.ui.View):
     """View for displaying user rankings across all metrics with period tabs."""
     
     def __init__(self, username: str, category: str, rankings_data: dict, user_is_tracked: bool):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.username = username
         self.category = category
         self.rankings_data = rankings_data
@@ -10217,6 +10601,7 @@ class RankingsTabView(discord.ui.View):
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        self.message = None  # Store message reference for timeout handling
         
         # Map category to display name
         self.category_display = {
@@ -10232,6 +10617,13 @@ class RankingsTabView(discord.ui.View):
         # Update button styles
         self.update_button_styles()
     
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
     def _add_buttons(self):
         """Add buttons and dropdowns."""
         # Add period selector dropdown (only if user is tracked)
@@ -10454,14 +10846,22 @@ class GuildRankingsTabView(discord.ui.View):
     """View for displaying guild rankings across all game types with period tabs."""
     
     def __init__(self, guild_name: str, rankings_data: dict, guild_is_tracked: bool):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.guild_name = guild_name
         self.rankings_data = rankings_data
         self.guild_is_tracked = guild_is_tracked
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        self.message = None  # Store message reference for timeout handling
         
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
         # Add buttons conditionally
         self._add_buttons()
     
@@ -10761,9 +11161,11 @@ async def _handle_rankings(interaction: discord.Interaction, category: str, ign:
         embed, file, _ = view.generate_rankings_image()
         
         if file:
-            await interaction.followup.send(view=view, file=file, embed=embed)
+            message = await interaction.followup.send(view=view, file=file, embed=embed)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
         
         # Clean up: Remove user from database if they were temporarily added
         if should_cleanup:
@@ -10831,9 +11233,11 @@ async def _handle_guild_rankings(interaction: discord.Interaction, guild_name: s
         embed, file, _ = view.generate_rankings_image()
         
         if file:
-            await interaction.followup.send(view=view, file=file, embed=embed)
+            message = await interaction.followup.send(view=view, file=file, embed=embed)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
         
         # Clean up: Remove guild from database if it was temporarily added
         if should_cleanup:
@@ -10916,9 +11320,11 @@ async def _handle_leaderboard(interaction: discord.Interaction, category: str, m
         
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
-            await interaction.followup.send(view=view, file=file)
+            message = await interaction.followup.send(view=view, file=file)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
     except Exception as e:
         await interaction.followup.send(f"❌ [ERROR] {str(e)}")
 
@@ -10949,9 +11355,11 @@ async def _handle_guild_leaderboard(interaction: discord.Interaction, game: str)
         
         embed, file, _ = await asyncio.to_thread(view.generate_leaderboard_image, "lifetime", 0)
         if file:
-            await interaction.followup.send(view=view, file=file)
+            message = await interaction.followup.send(view=view, file=file)
+            view.message = message  # Store message reference for timeout handling
         else:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
     except Exception as e:
         await interaction.followup.send(f"❌ [ERROR] {str(e)}")
 
@@ -11056,12 +11464,13 @@ class GuildLeaderboardPeriodSelect(discord.ui.Select):
 
 class GuildLeaderboardView(discord.ui.View):
     def __init__(self, game: str, data_cache: dict):
-        super().__init__()
+        super().__init__(timeout=180)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.game = game
         self.data_cache = data_cache
         self.current_period = "lifetime"
         self.page = 0
         self.page_size = 10
+        self.message = None  # Store message reference for timeout handling
         
         # Game display names
         self.game_labels = CATEGORY_METRICS.get("guild", {})
@@ -11082,6 +11491,14 @@ class GuildLeaderboardView(discord.ui.View):
         
         # Search button
         self.search_button = discord.ui.Button(label="🔍 Search", style=discord.ButtonStyle.secondary, row=1)
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
         self.search_button.callback = self.search_callback
         self.add_item(self.search_button)
     
@@ -11395,11 +11812,20 @@ async def prestiges(interaction: discord.Interaction):
 
 class CarriedView(discord.ui.View):
     def __init__(self, ign: str, stats_data: dict):
-        super().__init__()
+        super().__init__(timeout=840)  # 14 minutes (840 seconds) - remove buttons before Discord's 15-minute limit
         self.ign = ign
         self.stats_data = stats_data
         self.current_tab = "lifetime"
+        self.message = None  # Store message reference for timeout handling
         self.update_buttons()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
     
     def update_buttons(self):
         for child in self.children:
@@ -11649,16 +12075,22 @@ async def aretheycarried(interaction: discord.Interaction, ign: str):
         embed = view.generate_embed("lifetime")
         
         if is_tracked:
-            await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
         else:
-            message = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
-            await interaction.followup.send(content=message, embed=embed)
+            msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=msg, embed=embed)
         
     except Exception as e:
-        print(f"[ERROR] Exception in /aretheycarried: {str(e)}")
         import traceback
-        traceback.print_exc()
-        await interaction.followup.send(f"[ERROR] {str(e)}")
+        error_traceback = traceback.format_exc()
+        await send_error_with_report(
+            interaction,
+            "An unexpected error occurred while calculating carried scores.",
+            f"{str(e)}\n\n{error_traceback}",
+            "/aretheycarried",
+            f"IGN: {ign}"
+        )
 
 
 @bot.tree.command(name="stopbot", description="Gracefully shutdown the bot (admin only)")
