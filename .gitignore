@@ -113,3 +113,5 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+stats.db.corrupted-backup-20260208_181105
+stats.db.corrupted-backup-20260208_181543

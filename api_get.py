@@ -721,40 +721,66 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
 
     print(f"[API] Extracted {len(current)} stats for {proper_username}")
 
-    # Fetch guild information
-    print(f"[DEBUG] Fetching guild information for {proper_username} (UUID: {uuid})")
+    # OPTIMIZATION: Check if user is tracked - tracked users get guild updates via background task
+    # Only fetch guild data for non-tracked users to reduce API calls
+    from db_helper import is_tracked_user, get_user_meta
+    is_user_tracked = is_tracked_user(proper_username)
+    
     guild_name = None
-    try:
-        guild_data = get_hypixel_guild(uuid, api_key)
-        # Save guild data to file for inspection
-        guild_file = SCRIPT_DIR / "guild_info.json"
-        with open(guild_file, 'w') as f:
-            json.dump(guild_data, f, indent=2)
-        print(f"[DEBUG] Guild data saved to guild_info.json")
-        guild_tag, guild_color = extract_guild_info(guild_data)
-        # Extract guild name
-        if guild_data.get("success") and guild_data.get("guild"):
-            guild_name = guild_data["guild"].get("name")
-            print(f"[DEBUG] Extracted guild name: {guild_name}")
-        print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            print(f"[DEBUG] Rate limited (429) fetching guild data for {proper_username}. Using cached data.")
-            guild_tag, guild_color = None, None
-        else:
+    guild_tag = None
+    guild_color = None
+    guild_api_fetched = False  # Track if we made a guild API call
+    
+    # For tracked users, try to use cached guild data from database
+    if is_user_tracked:
+        print(f"[OPTIMIZE] User {proper_username} is tracked - skipping guild API fetch, using cached data")
+        try:
+            cached_meta = get_user_meta(proper_username)
+            if cached_meta:
+                guild_tag = cached_meta.get('guild_tag')
+                guild_color = cached_meta.get('guild_hex')
+                # Try to get guild name from guild_name field in meta (if it exists)
+                guild_name = cached_meta.get('guild_name')
+                print(f"[OPTIMIZE] Using cached guild data: tag={guild_tag}, color={guild_color}, name={guild_name}")
+        except Exception as e:
+            print(f"[DEBUG] Failed to get cached guild data: {e}")
+    
+    # For untracked users or if we don't have cached data, fetch from API
+    if not is_user_tracked or (guild_tag is None and guild_color is None):
+        print(f"[DEBUG] Fetching guild information for {proper_username} (UUID: {uuid})")
+        try:
+            guild_data = get_hypixel_guild(uuid, api_key)
+            guild_api_fetched = True  # Mark that we made a guild API call
+            # Save guild data to file for inspection
+            guild_file = SCRIPT_DIR / "guild_info.json"
+            with open(guild_file, 'w') as f:
+                json.dump(guild_data, f, indent=2)
+            print(f"[DEBUG] Guild data saved to guild_info.json")
+            guild_tag, guild_color = extract_guild_info(guild_data)
+            # Extract guild name
+            if guild_data.get("success") and guild_data.get("guild"):
+                guild_name = guild_data["guild"].get("name")
+                print(f"[DEBUG] Extracted guild name: {guild_name}")
+            print(f"[DEBUG] Extracted guild tag: {guild_tag}, color: {guild_color}")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                print(f"[DEBUG] Rate limited (429) fetching guild data for {proper_username}. Using cached data.")
+                guild_tag, guild_color = None, None
+            else:
+                print(f"[DEBUG] Failed to fetch guild data: {e}")
+                guild_tag, guild_color = None, None
+        except Exception as e:
             print(f"[DEBUG] Failed to fetch guild data: {e}")
             guild_tag, guild_color = None, None
-    except Exception as e:
-        print(f"[DEBUG] Failed to fetch guild data: {e}")
-        guild_tag, guild_color = None, None
 
     # Extract and save player rank and guild info to database
     rank = extract_player_rank(data)
     print(f"[DEBUG] Extracted rank for {proper_username}: {rank}")
     save_user_color_and_rank(proper_username, rank, guild_tag, guild_color, guild_name)
 
-    # If player is in a guild, fetch and update guild exp stats to auto-register the guild
-    if guild_name and guild_tag:
+    # OPTIMIZATION: Only auto-register guild for untracked users
+    # Tracked users' guilds are already being updated by background tasks
+    if guild_name and guild_tag and not is_user_tracked:
         print(f"[DEBUG] Player is in guild '{guild_name}', fetching guild exp stats...")
         try:
             # Pass snapshot_sections so guild gets the same snapshots as the player
@@ -765,6 +791,8 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
                 print(f"[DEBUG] Failed to fetch guild exp: {guild_result.get('error')}")
         except Exception as guild_err:
             print(f"[DEBUG] Failed to auto-register guild '{guild_name}': {guild_err}")
+    elif guild_name and guild_tag and is_user_tracked:
+        print(f"[OPTIMIZE] Skipping guild auto-registration for tracked user {proper_username} - guild updates handled by background task")
 
     # Determine which stat categories are NEW for this user
     new_stat_categories = set()
@@ -811,12 +839,20 @@ def api_update_database(username: str, api_key: str, snapshot_sections: set[str]
     
     print(f"[DB] Successfully updated {proper_username}")
     
+    # Track API calls made
+    api_calls = {
+        'player': 1,  # Always make 1 player call
+        'guild': 1 if guild_api_fetched else 0,  # Guild call only if we fetched it
+        'total': 1 + (1 if guild_api_fetched else 0)
+    }
+    
     return {
         "uuid": uuid,
         "stats": current,
         "processed_stats": processed_stats,
         "database": "stats.db",
-        "username": proper_username
+        "username": proper_username,
+        "api_calls": api_calls
     }
 
 

@@ -86,6 +86,70 @@ CREATOR_TZ = ZoneInfo("America/New_York")
 
 START_TIME = time.time()
 
+# API Request Tracking System
+class APIRequestTracker:
+    """Track API requests in 5-minute windows."""
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.current_window_start = None
+        self.requests = {
+            'player': 0,
+            'guild': 0,
+            'status': 0,
+            'other': 0
+        }
+    
+    def _get_current_window(self):
+        """Get the start time of the current 5-minute window."""
+        now = time.time()
+        # Round down to nearest 5-minute mark
+        return int(now // 300) * 300
+    
+    async def log_request(self, request_type: str):
+        """Log an API request of the given type."""
+        async with self.lock:
+            current_window = self._get_current_window()
+            
+            # Reset if we're in a new window
+            if self.current_window_start != current_window:
+                self.current_window_start = current_window
+                self.requests = {
+                    'player': 0,
+                    'guild': 0,
+                    'status': 0,
+                    'other': 0
+                }
+            
+            # Increment the appropriate counter
+            if request_type in self.requests:
+                self.requests[request_type] += 1
+            else:
+                self.requests['other'] += 1
+    
+    async def get_stats(self):
+        """Get current API request statistics."""
+        async with self.lock:
+            current_window = self._get_current_window()
+            
+            # Reset if we're in a new window
+            if self.current_window_start != current_window:
+                self.current_window_start = current_window
+                self.requests = {
+                    'player': 0,
+                    'guild': 0,
+                    'status': 0,
+                    'other': 0
+                }
+            
+            total = sum(self.requests.values())
+            return {
+                'total': total,
+                'breakdown': dict(self.requests),
+                'window_start': self.current_window_start
+            }
+
+API_TRACKER = APIRequestTracker()
+
 # Font cache to avoid repeatedly searching for fonts
 _FONT_CACHE = {}
 
@@ -3472,6 +3536,29 @@ async def _delayed_refresh_user(username: str, delay: float):
         await asyncio.sleep(delay)
         result = await asyncio.to_thread(run_script, "api_get.py", ["-ign", username])
 
+        # Track API calls
+        if result and result.stdout:
+            try:
+                json_data = None
+                for line in reversed(result.stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith('{') and line.endswith('}'):
+                        try:
+                            json_data = json.loads(line)
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                
+                # Log API calls to tracker
+                if json_data and 'api_calls' in json_data:
+                    api_calls = json_data['api_calls']
+                    if api_calls.get('player', 0) > 0:
+                        await API_TRACKER.log_request('player')
+                    if api_calls.get('guild', 0) > 0:
+                        await API_TRACKER.log_request('guild')
+            except Exception:
+                pass
+
         # Try to update cache/streaks from stdout JSON
         if result and result.stdout:
             try:
@@ -3569,6 +3656,68 @@ async def streak_stats_refresher(interval_seconds: int = 60):
         except Exception as e:
             print(f"[REFRESH] Streak refresher error: {e}")
             await asyncio.sleep(interval_seconds)
+
+
+async def guild_updater_hourly():
+    """Background task that updates guild data for all tracked users' guilds every hour.
+    
+    This runs on a 1-hour interval to fetch guild tag/color/exp data for guilds
+    of tracked users, reducing API pressure while keeping guild data reasonably fresh.
+    """
+    # Wait 5 minutes before first run to let the bot stabilize
+    await asyncio.sleep(300)
+    
+    while True:
+        try:
+            print(f"[GUILD_UPDATE] Starting hourly guild update cycle")
+            
+            # Get all tracked users and extract their guilds
+            tracked_users = await asyncio.to_thread(load_tracked_users)
+            user_colors = await asyncio.to_thread(load_user_colors)
+            
+            guilds_to_update = set()
+            for username in tracked_users:
+                user_meta = user_colors.get(username.lower(), {})
+                guild_name = user_meta.get('guild_name')
+                if guild_name:
+                    guilds_to_update.add(guild_name)
+            
+            if guilds_to_update:
+                print(f"[GUILD_UPDATE] Found {len(guilds_to_update)} guilds to update")
+                
+                # Spread guild updates over 30 minutes to avoid API spikes
+                interval_per_guild = min(1800 / len(guilds_to_update), 60)  # Max 30 min, min 1 sec between
+                
+                for guild_name in guilds_to_update:
+                    try:
+                        # Use batch_update.py to update guild (it has built-in API tracking)
+                        result = await asyncio.to_thread(
+                            run_script, "batch_update.py", ["--guild", guild_name]
+                        )
+                        
+                        if result and result.returncode == 0:
+                            await API_TRACKER.log_request('guild')
+                            print(f"[GUILD_UPDATE] Successfully updated guild: {guild_name}")
+                        else:
+                            print(f"[GUILD_UPDATE] Failed to update guild: {guild_name}")
+                        
+                        # Wait before next guild
+                        await asyncio.sleep(interval_per_guild)
+                        
+                    except Exception as e:
+                        print(f"[GUILD_UPDATE] Error updating guild {guild_name}: {e}")
+                        await asyncio.sleep(5)  # Brief pause on error
+                
+                print(f"[GUILD_UPDATE] Hourly guild update cycle complete")
+            else:
+                print(f"[GUILD_UPDATE] No guilds to update")
+            
+            # Wait 1 hour until next cycle
+            await asyncio.sleep(3600)
+            
+        except Exception as e:
+            print(f"[GUILD_UPDATE] Hourly guild updater error: {e}")
+            await asyncio.sleep(3600)  # Wait an hour before retrying on error
 
 
 # Track last known player count for Sheep Wars to calculate delta
@@ -7156,10 +7305,11 @@ async def on_ready():
             bot.loop.create_task(scheduler_loop()),
             bot.loop.create_task(staggered_stats_refresher(interval_minutes=10)),
             bot.loop.create_task(streak_stats_refresher(interval_seconds=60)),
-            bot.loop.create_task(presence_updater_loop(interval_seconds=5))
+            bot.loop.create_task(presence_updater_loop(interval_seconds=5)),
+            bot.loop.create_task(guild_updater_hourly())
         ]
         bot.background_tasks_started = True
-        print(f"[OK] Background tasks started - Instance ID: {bot_instance_id}")
+        print(f"[OK] Background tasks started (including hourly guild updater) - Instance ID: {bot_instance_id}")
 
 @bot.tree.command(name="track", description="Create a stats sheet for a player (no authorization required)")
 @discord.app_commands.describe(ign="Minecraft IGN")
@@ -8455,6 +8605,83 @@ async def version(interaction: discord.Interaction):
     await interaction.followup.send(f"Bot Uptime: {hours}h {minutes}m {seconds}s\nRunning from: {BOT_DIR}", ephemeral=True)
 
 
+@bot.tree.command(name="api-stats", description="View Hypixel API usage statistics for the current 5-minute window")
+async def api_stats(interaction: discord.Interaction):
+    """Show API request statistics for the current 5-minute window."""
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    
+    # Get stats from tracker
+    stats = await API_TRACKER.get_stats()
+    
+    # Calculate time until next reset
+    current_time = time.time()
+    window_start = stats['window_start']
+    next_reset = window_start + 300  # 5 minutes in seconds
+    seconds_until_reset = int(next_reset - current_time)
+    
+    minutes, seconds = divmod(seconds_until_reset, 60)
+    
+    # Format timestamp for window start
+    from datetime import datetime
+    window_time = datetime.fromtimestamp(window_start, tz=CREATOR_TZ).strftime('%I:%M %p')
+    
+    # Build embed
+    embed = discord.Embed(
+        title="📊 Hypixel API Usage Statistics",
+        description=f"Current 5-minute window: **{window_time}**\nResets in: **{minutes}m {seconds}s**",
+        color=discord.Color.blue()
+    )
+    
+    # Total requests
+    total = stats['total']
+    embed.add_field(
+        name="Total Requests",
+        value=f"```{total}```",
+        inline=False
+    )
+    
+    # Breakdown
+    breakdown = stats['breakdown']
+    breakdown_text = "\n".join([
+        f"**{category.capitalize()}**: {count}"
+        for category, count in sorted(breakdown.items(), key=lambda x: x[1], reverse=True)
+        if count > 0
+    ])
+    
+    if not breakdown_text:
+        breakdown_text = "*No requests recorded in this window*"
+    
+    embed.add_field(
+        name="Breakdown by Type",
+        value=breakdown_text,
+        inline=False
+    )
+    
+    # Rate limit info
+    embed.add_field(
+        name="ℹ️ Hypixel API Limits",
+        value="• 120 requests/minute per API key\n• 600 requests per 5 minutes\n• Rate limits reset every 5 minutes",
+        inline=False
+    )
+    
+    # Usage percentage (assuming 600 limit per 5 minutes)
+    usage_pct = (total / 600) * 100
+    if usage_pct < 50:
+        usage_emoji = "🟢"
+        usage_status = "Low"
+    elif usage_pct < 80:
+        usage_emoji = "🟡"
+        usage_status = "Moderate"
+    else:
+        usage_emoji = "🔴"
+        usage_status = "High"
+    
+    embed.set_footer(text=f"{usage_emoji} API Usage: {usage_status} ({usage_pct:.1f}% of 5-min limit)")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="refresh", description="Manually run batch snapshot update for all tracked users")
 @discord.app_commands.describe(mode="One of: session, daily, yesterday, monthly, all, or all+session", ign="Optional: Minecraft IGN to refresh")
 @discord.app_commands.choices(mode=[
@@ -8589,6 +8816,124 @@ async def fixguilds(interaction: discord.Interaction):
             ephemeral=True
         )
 
+# ==============================
+# STATS COMMAND HELPERS
+# ==============================
+
+async def _send_stats_response(interaction: discord.Interaction, ign: str, user_data: dict, is_tracked: bool, is_initial: bool = False):
+    """Helper function to send stats response (used for both cached and fresh data)."""
+    EXCEL_FILE = BOT_DIR / "stats.xlsx"
+    if not EXCEL_FILE.exists():
+        await interaction.followup.send("[ERROR] Excel file not found")
+        return
+
+    view = StatsFullView(user_data, ign)
+    embed, file = view.generate_full_image("all-time")
+    
+    # Add note if showing cached data
+    cached_note = ""
+    if is_initial and not is_tracked:
+        cached_note = "⚡ Showing cached data (updating in background)...\n"
+
+    if file:
+        if is_tracked:
+            message = await interaction.followup.send(view=view, file=file)
+            view.message = message  # Store message reference for timeout handling
+        else:
+            msg = f"{cached_note}`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=msg, file=file)
+            # Register user in database for leaderboard accuracy (but don't actively track)
+            register_user(ign)
+    else:
+        if is_tracked:
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message  # Store message reference for timeout handling
+        else:
+            msg = f"{cached_note}`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
+            await interaction.followup.send(content=msg, embed=embed)
+            # Register user in database for leaderboard accuracy (but don't actively track)
+            register_user(ign)
+
+
+async def _background_update_stats(ign: str, interaction: discord.Interaction):
+    """Background task to update stats for untracked users after showing cached data.
+    
+    After the update completes, edits the original Discord message to show fresh data.
+    """
+    try:
+        print(f"[OPTIMIZE] Background update started for {ign}")
+        result = run_script("api_get.py", ["-ign", ign])
+        
+        # Track API calls
+        if result.returncode == 0 and result.stdout:
+            try:
+                json_data = None
+                for line in reversed(result.stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith('{') and line.endswith('}'):
+                        try:
+                            json_data = json.loads(line)
+                            break
+                        except json.JSONDecodeError:
+                            continue
+                
+                if json_data:
+                    # Log API calls
+                    if 'api_calls' in json_data:
+                        api_calls = json_data['api_calls']
+                        if api_calls.get('player', 0) > 0:
+                            await API_TRACKER.log_request('player')
+                        if api_calls.get('guild', 0) > 0:
+                            await API_TRACKER.log_request('guild')
+                    
+                    # Update cache
+                    if "processed_stats" in json_data and "username" in json_data:
+                        await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
+                        print(f"[OPTIMIZE] Background update completed for {ign}, updating Discord message")
+                        
+                        # Get the fresh data and edit the original message
+                        cache_data = await STATS_CACHE.get_data()
+                        updated_ign = json_data["username"]
+                        key = updated_ign.casefold()
+                        user_data = None
+                        for name, data in cache_data.items():
+                            if name.casefold() == key:
+                                user_data = data
+                                updated_ign = name
+                                break
+                        
+                        if user_data:
+                            # Generate fresh stats image/embed
+                            EXCEL_FILE = BOT_DIR / "stats.xlsx"
+                            if EXCEL_FILE.exists():
+                                view = StatsFullView(user_data, updated_ign)
+                                embed, file = view.generate_full_image("all-time")
+                                
+                                # Try to edit the original message
+                                try:
+                                    # Get the original message
+                                    original_messages = [msg async for msg in interaction.channel.history(limit=10)]
+                                    for msg in original_messages:
+                                        if msg.interaction and msg.interaction.id == interaction.id:
+                                            # Found the original response, edit it
+                                            if file:
+                                                msg_content = f"`{updated_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{updated_ign}` to start tracking and enable session/daily/monthly stats.\n\n✅ **Updated with fresh data**"
+                                                await msg.edit(content=msg_content, attachments=[file])
+                                            else:
+                                                msg_content = f"`{updated_ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{updated_ign}` to start tracking and enable session/daily/monthly stats.\n\n✅ **Updated with fresh data**"
+                                                await msg.edit(content=msg_content, embed=embed)
+                                            print(f"[OPTIMIZE] Successfully edited Discord message with fresh data for {ign}")
+                                            break
+                                except Exception as e:
+                                    print(f"[WARNING] Failed to edit Discord message: {e}")
+            except Exception as e:
+                print(f"[WARNING] Failed to process background update result: {e}")
+        else:
+            print(f"[WARNING] Background update failed for {ign}: {result.stderr if result.stderr else 'Unknown error'}")
+    except Exception as e:
+        print(f"[ERROR] Background update exception for {ign}: {e}")
+
+
 @bot.tree.command(name="stats", description="Get full player stats (Template.xlsx layout) with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN (optional if you set /default)")
 async def stats(interaction: discord.Interaction, ign: str = None):
@@ -8624,8 +8969,26 @@ async def stats(interaction: discord.Interaction, ign: str = None):
             ign = name
             break
 
-    # If not in cache, fetch fresh stats
-    if not user_data:
+    # OPTIMIZATION: For untracked users with cached data, show it immediately and update in background
+    user_is_tracked = is_tracked_user(ign)
+    show_cached_first = user_data and not user_is_tracked
+    
+    if show_cached_first:
+        print(f"[OPTIMIZE] Showing cached data for untracked user {ign}, will update in background")
+        # Show cached data immediately
+        try:
+            await _send_stats_response(interaction, ign, user_data, user_is_tracked, is_initial=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to send cached stats: {e}")
+            show_cached_first = False  # Fall back to normal flow
+        
+        # Update in background asynchronously
+        if show_cached_first:
+            asyncio.create_task(_background_update_stats(ign, interaction))
+            return  # Exit early since we already sent response
+
+    # If not in cache OR if tracked user, fetch fresh stats (blocking)
+    if not user_data or user_is_tracked:
         try:
             # Fetch fresh stats
             print(f"[DEBUG] Running api_get.py for IGN: {ign} (/stats)")
@@ -8769,35 +9132,8 @@ async def stats(interaction: discord.Interaction, ign: str = None):
         )
         return
 
-    EXCEL_FILE = BOT_DIR / "stats.xlsx"
-    if not EXCEL_FILE.exists():
-        await interaction.followup.send("[ERROR] Excel file not found")
-        return
-
-    # Check if user is tracked (UUID-aware)
-    is_tracked = is_tracked_user(ign)
-
-    view = StatsFullView(user_data, ign)
-    embed, file = view.generate_full_image("all-time")
-
-    if file:
-        if is_tracked:
-            message = await interaction.followup.send(view=view, file=file)
-            view.message = message  # Store message reference for timeout handling
-        else:
-            msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
-            await interaction.followup.send(content=msg, file=file)
-            # Register user in database for leaderboard accuracy (but don't actively track)
-            register_user(ign)
-    else:
-        if is_tracked:
-            message = await interaction.followup.send(embed=embed, view=view)
-            view.message = message  # Store message reference for timeout handling
-        else:
-            msg = f"`{ign}` is not currently tracked. Only all-time stats are available.\nUse `/track ign:{ign}` to start tracking and enable session/daily/monthly stats."
-            await interaction.followup.send(content=msg, embed=embed)
-            # Register user in database for leaderboard accuracy (but don't actively track)
-            register_user(ign)
+    # Send stats using helper function
+    await _send_stats_response(interaction, ign, user_data, is_tracked_user(ign), is_initial=False)
 
 
 @bot.tree.command(name="streak", description="View current win/kill streaks (approved users)")
@@ -8889,6 +9225,84 @@ async def streak(interaction: discord.Interaction, ign: str = None):
 
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
+
+
+@bot.tree.command(name="streak-remove", description="Stop tracking streaks for a user (Admin or self)")
+@discord.app_commands.describe(ign="Minecraft IGN to stop tracking streaks for")
+async def streak_remove(interaction: discord.Interaction, ign: str):
+    """Remove a user from streak tracking.
+    
+    Admins can remove anyone. Regular users can only remove themselves.
+    """
+    # Validate username
+    ok, proper_ign = validate_and_normalize_ign(ign)
+    if not ok:
+        await interaction.response.send_message(f"The username {ign} is invalid.", ephemeral=True)
+        return
+    ign = proper_ign
+    
+    # Check permissions
+    is_user_admin = is_admin(interaction.user)
+    
+    # If not admin, check if user is trying to remove themselves
+    if not is_user_admin:
+        # Get user's linked IGN or default
+        user_linked_ign = None
+        user_links = load_user_links()
+        for linked_ign, discord_id in user_links.items():
+            if str(discord_id) == str(interaction.user.id):
+                user_linked_ign = linked_ign
+                break
+        
+        if not user_linked_ign:
+            user_linked_ign = get_default_user(interaction.user.id)
+        
+        # Check if they're trying to remove themselves
+        if not user_linked_ign or user_linked_ign.lower() != ign.lower():
+            await interaction.response.send_message(
+                "❌ You can only remove streak tracking for your own account.\n"
+                f"Admins can remove streak tracking for any user.",
+                ephemeral=True
+            )
+            return
+    
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Check if user has streak tracking
+        streaks = load_tracked_streaks()
+        entry_key = None
+        for k in streaks.keys():
+            if k.casefold() == ign.casefold():
+                entry_key = k
+                break
+        
+        if not entry_key:
+            await interaction.followup.send(
+                f"❌ `{ign}` does not have streak tracking enabled.",
+                ephemeral=True
+            )
+            return
+        
+        # Remove from streak tracking
+        del streaks[entry_key]
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM tracked_streaks WHERE LOWER(username) = LOWER(?)', (ign,))
+            conn.commit()
+        
+        await interaction.followup.send(
+            f"✅ Removed streak tracking for `{ign}`.\n\n"
+            f"💡 This user will now receive updates every **10 minutes** instead of every **60 seconds**, "
+            f"significantly reducing API usage.",
+            ephemeral=True
+        )
+        
+        print(f"[STREAK_REMOVE] {interaction.user.name} removed streak tracking for {ign}")
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ [ERROR] {str(e)}", ephemeral=True)
 
 
 # Helper classes for /layout command
@@ -10272,6 +10686,9 @@ def _calculate_user_rankings(username: str, category: str):
     
     OPTIMIZED: Loads all users once and calculates all rankings in memory,
     instead of loading all users separately for each metric.
+    
+    POTENTIAL FUTURE OPTIMIZATION: Could cache leaderboard calculations for 
+    lifetime rankings for ~30-60 seconds since they change less frequently.
     
     Returns:
         dict: {
