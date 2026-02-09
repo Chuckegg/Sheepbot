@@ -115,3 +115,7 @@ wheels/
 *.egg
 stats.db.corrupted-backup-20260208_181105
 stats.db.corrupted-backup-20260208_181543
+stats.db.corrupted.20260209_181924
+repair_database.py
+verify_guild_setup.py
+test_guild_snapshots.py

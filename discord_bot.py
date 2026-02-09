@@ -55,6 +55,7 @@ from db_helper import (
 )
 import re
 import shutil
+import sqlite3
 from zoneinfo import ZoneInfo
 import json
 from pathlib import Path
@@ -149,6 +150,180 @@ class APIRequestTracker:
             }
 
 API_TRACKER = APIRequestTracker()
+
+# Database Repair Functions
+DB_PATH = str(BOT_DIR / "stats.db")
+BACKUP_DIR = str(BOT_DIR / "backups")
+
+def check_database_integrity(db_path):
+    """
+    Check if database is corrupted.
+    Returns: (is_valid, error_message)
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Run integrity check
+        cursor.execute("PRAGMA integrity_check;")
+        result = cursor.fetchone()
+        
+        conn.close()
+        
+        if result[0] == "ok":
+            return True, None
+        else:
+            return False, result[0]
+            
+    except sqlite3.DatabaseError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+def find_latest_valid_backup():
+    """
+    Find the most recent non-corrupted backup file.
+    Returns: (backup_path, timestamp_str) or (None, None)
+    """
+    if not os.path.exists(BACKUP_DIR):
+        return None, None
+        
+    backups = [f for f in os.listdir(BACKUP_DIR) if f.startswith("stats_") and f.endswith(".db")]
+    if not backups:
+        return None, None
+        
+    # Sort by filename (which includes timestamp) - newest first
+    backups.sort(reverse=True)
+    
+    # Check each backup until we find a valid one
+    for backup_file in backups:
+        backup_path = os.path.join(BACKUP_DIR, backup_file)
+        is_valid, _ = check_database_integrity(backup_path)
+        if is_valid:
+            # Extract timestamp from filename (stats_2026-02-08_23-00-00.db)
+            timestamp_str = backup_file.replace("stats_", "").replace(".db", "")
+            return backup_path, timestamp_str
+    
+    return None, None
+
+def try_repair_database(db_path):
+    """
+    Attempt to repair database using SQLite's dump and restore method.
+    Returns: (success, message)
+    """
+    try:
+        # Create temporary file for dump
+        dump_file = f"{db_path}.dump.sql"
+        repaired_file = f"{db_path}.repaired"
+        
+        # Dump the database (this reads all accessible data)
+        conn = sqlite3.connect(db_path)
+        with open(dump_file, 'w') as f:
+            for line in conn.iterdump():
+                f.write(f'{line}\n')
+        conn.close()
+        
+        # Create new database from dump
+        if os.path.exists(repaired_file):
+            os.remove(repaired_file)
+            
+        conn_new = sqlite3.connect(repaired_file)
+        cursor = conn_new.cursor()
+        with open(dump_file, 'r') as f:
+            cursor.executescript(f.read())
+        conn_new.commit()
+        conn_new.close()
+        
+        # Check integrity of repaired database
+        is_valid, error = check_database_integrity(repaired_file)
+        if not is_valid:
+            os.remove(dump_file)
+            os.remove(repaired_file)
+            return False, f"Repaired database still has issues: {error}"
+            
+        # Backup corrupted database
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        corrupted_backup = f"stats.db.corrupted.{timestamp}"
+        shutil.copy2(db_path, corrupted_backup)
+        
+        # Replace with repaired database
+        shutil.move(repaired_file, db_path)
+        
+        # Clean up dump file
+        os.remove(dump_file)
+        
+        return True, f"Database repaired successfully! Corrupted database saved to: {corrupted_backup}"
+        
+    except Exception as e:
+        # Clean up temporary files
+        if os.path.exists(dump_file):
+            os.remove(dump_file)
+        if os.path.exists(repaired_file):
+            os.remove(repaired_file)
+        return False, f"Repair failed: {str(e)}"
+
+def restore_from_backup(backup_path, db_path):
+    """
+    Restore database from backup.
+    Returns: (success, message)
+    """
+    if not os.path.exists(backup_path):
+        return False, f"Backup file not found: {backup_path}"
+        
+    try:
+        # First, validate the backup (should already be validated, but double-check)
+        is_valid, error = check_database_integrity(backup_path)
+        if not is_valid:
+            return False, f"Backup file is corrupted: {error}"
+            
+        # Create a backup of the corrupted database
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        corrupted_backup = f"stats.db.corrupted.{timestamp}"
+        if os.path.exists(db_path):
+            shutil.copy2(db_path, corrupted_backup)
+        
+        # Restore from backup
+        shutil.copy2(backup_path, db_path)
+        
+        # Verify the restored database
+        is_valid, error = check_database_integrity(db_path)
+        if is_valid:
+            return True, f"Database restored from backup. Corrupted database saved to: {corrupted_backup}"
+        else:
+            return False, f"Restored database failed integrity check: {error}"
+            
+    except Exception as e:
+        return False, f"Error during restore: {str(e)}"
+
+async def perform_database_repair():
+    """
+    Perform database repair with the following strategy:
+    1. Try to repair the database using dump/restore
+    2. ONLY IF REPAIR FAILS: Find latest valid backup and restore from it
+    
+    Returns: (success, message, backup_used)
+    """
+    # Check if database is corrupted
+    is_valid, error = check_database_integrity(DB_PATH)
+    if is_valid:
+        return True, "Database is healthy - no repair needed", None
+    
+    # Try repair first
+    success, message = try_repair_database(DB_PATH)
+    if success:
+        return True, message, None
+    
+    # Repair failed - find latest valid backup
+    backup_path, timestamp_str = find_latest_valid_backup()
+    if not backup_path:
+        return False, "Repair failed and no valid backups found", None
+    
+    # Restore from backup
+    success, restore_message = restore_from_backup(backup_path, DB_PATH)
+    if success:
+        return True, f"Repair failed. {restore_message}\nRestored from backup: {timestamp_str}", timestamp_str
+    else:
+        return False, f"Repair failed and restore also failed: {restore_message}", None
 
 # Font cache to avoid repeatedly searching for fonts
 _FONT_CACHE = {}
@@ -3968,6 +4143,8 @@ async def scheduler_loop():
                         print(f"[SCHEDULER] Full stdout:\n{yesterday_result.stdout}")
                         print(f"[SCHEDULER] Full stderr:\n{yesterday_result.stderr}")
                         await send_fetch_message(f"Warning: Yesterday snapshot failed at {now.strftime('%I:%M %p')}\nError: {error_detail[:500]}")
+                    else:
+                        print(f"[SCHEDULER] Yesterday snapshot completed successfully")
                     
                     # Step 1.5: Run weekly reset on Mondays (weekday() returns 0 for Monday)
                     if now.weekday() == 0:
@@ -4977,14 +5154,6 @@ class DistributionView(discord.ui.View):
         self.mode = mode  # 'kill' or 'death'
         self.current_tab = "all-time"
         self.message = None  # Store message reference for timeout handling
-        
-    async def on_timeout(self):
-        """Remove buttons when the view times out."""
-        if self.message:
-            try:
-                await self.message.edit(view=None)
-            except Exception:
-                pass  # Message might be deleted or inaccessible
         # Colors for legend slices
         self.slice_colors = {
             "void": (90, 155, 255),        # blue
@@ -4993,6 +5162,14 @@ class DistributionView(discord.ui.View):
             "melee": (126, 217, 126),      # green
         }
         self.update_buttons()
+        
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass  # Message might be deleted or inaccessible
 
     def update_buttons(self):
         for child in self.children:
@@ -7265,6 +7442,58 @@ async def send_error_with_report(
             pass
 
 
+# Database Repair Confirmation View
+class DatabaseRepairConfirmView(discord.ui.View):
+    """Confirmation view for database repair operations."""
+    def __init__(self, backup_file: str):
+        super().__init__(timeout=60)  # 1 minute timeout
+        self.backup_file = backup_file
+        self.confirmed = None
+        self.done_event = asyncio.Event()
+    
+    @discord.ui.button(label="✅ Confirm Repair", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("❌ Only administrators can confirm database repairs.", ephemeral=True)
+            return
+        
+        self.confirmed = True
+        self.done_event.set()
+        
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+        
+        await interaction.response.edit_message(
+            content=f"🔧 Repair confirmed. Processing...",
+            view=self
+        )
+    
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("❌ Only administrators can cancel database repairs.", ephemeral=True)
+            return
+        
+        self.confirmed = False
+        self.done_event.set()
+        
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+        
+        await interaction.response.edit_message(
+            content="❌ Database repair cancelled.",
+            view=self
+        )
+    
+    async def on_timeout(self):
+        """Handle timeout - auto-cancel if no response."""
+        if self.confirmed is None:
+            self.confirmed = False
+            self.done_event.set()
+
+
 # Bot token
 # Read from BOT_TOKEN.txt in the same directory
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), "BOT_TOKEN.txt")
@@ -7303,7 +7532,7 @@ async def on_ready():
         # Store task references for graceful shutdown
         bot.background_tasks = [
             bot.loop.create_task(scheduler_loop()),
-            bot.loop.create_task(staggered_stats_refresher(interval_minutes=10)),
+            bot.loop.create_task(staggered_stats_refresher(interval_minutes=5)),
             bot.loop.create_task(streak_stats_refresher(interval_seconds=60)),
             bot.loop.create_task(presence_updater_loop(interval_seconds=5)),
             bot.loop.create_task(guild_updater_hourly())
@@ -8682,6 +8911,245 @@ async def api_stats(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="repairdatabase", description="[ADMIN] Check and repair corrupted database, restoring from backup if needed")
+async def repairdatabase(interaction: discord.Interaction):
+    """Admin command to repair corrupted database."""
+    # Admin check
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to administrators.", ephemeral=True)
+        return
+    
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Check database integrity
+        is_valid, error_msg = check_database_integrity(DB_PATH)
+        
+        if is_valid:
+            embed = discord.Embed(
+                title="✅ Database Health Check",
+                description="The database is healthy and does not need repair.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        # Database is corrupted - show confirmation dialog
+        embed = discord.Embed(
+            title="⚠️ Database Corruption Detected",
+            description="The database has corruption issues and needs repair.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(
+            name="Corruption Details",
+            value=f"```{error_msg[:500]}```",
+            inline=False
+        )
+        
+        # Find latest valid backup
+        backup_path, timestamp_str = find_latest_valid_backup()
+        
+        if backup_path:
+            backup_display = timestamp_str.replace("_", " ").replace("-", "/")
+            embed.add_field(
+                name="📦 Backup Available",
+                value=f"Latest valid backup: `{timestamp_str}.db`\nTimestamp: {backup_display}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="⚠️ No Valid Backup Found",
+                value="No non-corrupted backups were found. Only repair attempt will be made.",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="🔧 Repair Strategy",
+            value="1. **First**: Attempt to repair using SQLite dump/restore\n2. **If repair fails**: Restore from latest valid backup\n\nThe corrupted database will be saved with timestamp for investigation.",
+            inline=False
+        )
+        
+        # Create confirmation view
+        view = DatabaseRepairConfirmView(timestamp_str if backup_path else "none")
+        
+        await interaction.followup.send(
+            content=f"**⚠️ Database repair required. Confirm to proceed:**",
+            embed=embed,
+            view=view,
+            ephemeral=True
+        )
+        
+        # Wait for confirmation (60 second timeout)
+        try:
+            await asyncio.wait_for(view.done_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "❌ Confirmation timeout - database repair cancelled.",
+                ephemeral=True
+            )
+            return
+        
+        if not view.confirmed:
+            # User cancelled
+            return
+        
+        # Perform repair
+        status_msg = await interaction.followup.send(
+            "🔧 Starting database repair process...",
+            ephemeral=True
+        )
+        
+        success, message, backup_used = await perform_database_repair()
+        
+        if success:
+            result_embed = discord.Embed(
+                title="✅ Database Repair Successful",
+                description=message,
+                color=discord.Color.green()
+            )
+            if backup_used:
+                result_embed.add_field(
+                    name="📦 Restored From Backup",
+                    value=f"`{backup_used}.db`",
+                    inline=False
+                )
+            result_embed.add_field(
+                name="ℹ️ Next Steps",
+                value="• The bot will continue running with the repaired database\n• Corrupted database was saved for analysis\n• Monitor for any issues",
+                inline=False
+            )
+            
+            # Reload cache after repair
+            await STATS_CACHE.reload_cache()
+            result_embed.add_field(
+                name="🔄 Cache Status",
+                value="Stats cache reloaded successfully",
+                inline=False
+            )
+        else:
+            result_embed = discord.Embed(
+                title="❌ Database Repair Failed",
+                description=message,
+                color=discord.Color.red()
+            )
+            result_embed.add_field(
+                name="⚠️ Manual Intervention Required",
+                value="Please check the backups directory for valid backups and manually restore if needed.",
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=result_embed, ephemeral=True)
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        error_embed = discord.Embed(
+            title="❌ Error During Repair Process",
+            description=f"An unexpected error occurred:\n```{str(e)[:500]}```",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+        print(f"[ERROR] Database repair command failed: {error_details}")
+
+
+@bot.tree.command(name="fixguildtracking", description="[ADMIN] Auto-track all guilds with tracked members")
+async def fixguildtracking(interaction: discord.Interaction):
+    """Admin command to automatically set is_tracked=1 for all guilds with tracked members."""
+    # Admin check
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ This command is only available to administrators.", ephemeral=True)
+        return
+    
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    
+    try:
+        def fix_guild_tracking():
+            """Find all guilds with tracked members and mark them as tracked."""
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Find all guilds that have tracked members but aren't marked as tracked
+                cursor.execute('''
+                    SELECT DISTINCT um.guild_name, tg.is_tracked
+                    FROM user_meta um
+                    JOIN tracked_users tu ON LOWER(um.username) = LOWER(tu.username)
+                    LEFT JOIN tracked_guilds tg ON um.guild_name = tg.name
+                    WHERE tu.is_tracked = 1 AND um.guild_name IS NOT NULL AND um.guild_name != ''
+                    ORDER BY um.guild_name
+                ''')
+                
+                guilds_info = cursor.fetchall()
+                needs_fix = []
+                already_tracked = []
+                
+                for row in guilds_info:
+                    guild_name = row['guild_name']
+                    is_tracked = row['is_tracked']
+                    
+                    if is_tracked != 1:
+                        needs_fix.append(guild_name)
+                    else:
+                        already_tracked.append(guild_name)
+                
+                # Fix guilds that need tracking
+                fixed = []
+                for guild_name in needs_fix:
+                    # Check if guild exists in tracked_guilds
+                    cursor.execute('SELECT name FROM tracked_guilds WHERE name = ?', (guild_name,))
+                    exists = cursor.fetchone()
+                    
+                    if exists:
+                        # Update existing entry
+                        cursor.execute('UPDATE tracked_guilds SET is_tracked = 1 WHERE name = ?', (guild_name,))
+                    else:
+                        # Insert new entry
+                        cursor.execute('''
+                            INSERT INTO tracked_guilds (name, added_at, is_tracked)
+                            VALUES (?, strftime('%s', 'now'), 1)
+                        ''', (guild_name,))
+                    
+                    fixed.append(guild_name)
+                
+                conn.commit()
+                return fixed, already_tracked
+        
+        fixed, already_tracked = await asyncio.to_thread(fix_guild_tracking)
+        
+        embed = discord.Embed(
+            title="🔧 Guild Tracking Fix Results",
+            color=discord.Color.blue()
+        )
+        
+        if fixed:
+            embed.add_field(
+                name=f"✅ Fixed ({len(fixed)} guilds)",
+                value="\n".join([f"• {g}" for g in fixed[:10]]) + (f"\n... and {len(fixed) - 10} more" if len(fixed) > 10 else ""),
+                inline=False
+            )
+        
+        if already_tracked:
+            embed.add_field(
+                name=f"ℹ️ Already Tracked ({len(already_tracked)} guilds)",
+                value="\n".join([f"• {g}" for g in already_tracked[:10]]) + (f"\n... and {len(already_tracked) - 10} more" if len(already_tracked) > 10 else ""),
+                inline=False
+            )
+        
+        if not fixed and not already_tracked:
+            embed.description = "No guilds found with tracked members."
+        
+        embed.set_footer(text="Tracked guilds will now appear in leaderboards and receive snapshot updates.")
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        await interaction.followup.send(f"❌ Error: {str(e)}\n```{error_details[:1000]}```", ephemeral=True)
+        print(f"[ERROR] fixguildtracking command failed: {error_details}")
+
+
 @bot.tree.command(name="refresh", description="Manually run batch snapshot update for all tracked users")
 @discord.app_commands.describe(mode="One of: session, daily, yesterday, monthly, all, or all+session", ign="Optional: Minecraft IGN to refresh")
 @discord.app_commands.choices(mode=[
@@ -8969,26 +9437,17 @@ async def stats(interaction: discord.Interaction, ign: str = None):
             ign = name
             break
 
-    # OPTIMIZATION: For untracked users with cached data, show it immediately and update in background
+    # Check if user is tracked
     user_is_tracked = is_tracked_user(ign)
-    show_cached_first = user_data and not user_is_tracked
     
-    if show_cached_first:
-        print(f"[OPTIMIZE] Showing cached data for untracked user {ign}, will update in background")
-        # Show cached data immediately
-        try:
-            await _send_stats_response(interaction, ign, user_data, user_is_tracked, is_initial=True)
-        except Exception as e:
-            print(f"[ERROR] Failed to send cached stats: {e}")
-            show_cached_first = False  # Fall back to normal flow
-        
-        # Update in background asynchronously
-        if show_cached_first:
-            asyncio.create_task(_background_update_stats(ign, interaction))
-            return  # Exit early since we already sent response
-
-    # If not in cache OR if tracked user, fetch fresh stats (blocking)
-    if not user_data or user_is_tracked:
+    # OPTIMIZATION: Tracked users ALWAYS use cached data (no API call)
+    if user_is_tracked and user_data:
+        print(f"[OPTIMIZE] User {ign} is tracked, using cached data (no API call)")
+        await _send_stats_response(interaction, ign, user_data, user_is_tracked, is_initial=False)
+        return
+    
+    # For untracked users: try to fetch fresh data, fall back to cache if rate limited
+    if not user_data:
         try:
             # Fetch fresh stats
             print(f"[DEBUG] Running api_get.py for IGN: {ign} (/stats)")
@@ -8998,8 +9457,33 @@ async def stats(interaction: discord.Interaction, ign: str = None):
             print(f"[DEBUG] api_get.py stderr (/stats): {result.stderr if result.stderr else 'None'}")
 
             if result.returncode != 0:
-                if result.stderr and "429" in result.stderr:
+                # Check if it's a rate limit in stderr or stdout
+                stdout_msg = result.stdout or ""
+                stderr_msg = result.stderr or ""
+                is_rate_limited = False
+                
+                if "429" in stderr_msg:
+                    is_rate_limited = True
+                
+                # Also check JSON in stdout for rate limit
+                if not is_rate_limited:
+                    try:
+                        for line in reversed(stdout_msg.splitlines()):
+                            line = line.strip()
+                            if line.startswith('{') and line.endswith('}'):
+                                try:
+                                    json_data = json.loads(line)
+                                    if json_data.get("skipped") and json_data.get("reason") == "rate_limited":
+                                        is_rate_limited = True
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                    except Exception:
+                        pass
+                
+                if is_rate_limited:
                     print(f"[DEBUG] Rate limited for {ign} (/stats), attempting to use existing data")
+                    # Don't return - continue to try to use cached data below
                 else:
                     stdout_msg = result.stdout or ""
                     stderr_msg = result.stderr or ""
@@ -9025,7 +9509,7 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                     user_msg = None
                     if "never played" in full_output.lower() or "no wool games data" in full_output.lower():
                         await interaction.followup.send(
-                            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
+                            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze. Alternatively, chuck managed to corrupt the database again."
                         )
                         return
                     elif error_details:
@@ -9070,22 +9554,42 @@ async def stats(interaction: discord.Interaction, ign: str = None):
                         error_msg = json_data.get("error", "Unknown error")
                         reason = json_data.get("reason", "unknown")
                         
-                        if "403" in error_msg or "Forbidden" in error_msg:
+                        # RATE LIMITED - Use cached data instead of showing error
+                        if reason == "rate_limited":
+                            print(f"[DEBUG] Rate limited for {ign}, using cached data")
+                            # Refresh cache to get latest data (snapshots were written)
+                            cache_data = await STATS_CACHE.get_data()
+                            user_data = None
+                            key = ign.casefold()
+                            for name, data in cache_data.items():
+                                if name.casefold() == key:
+                                    user_data = data
+                                    ign = name
+                                    break
+                            # Continue to show cached data (don't return here)
+                        elif "403" in error_msg or "Forbidden" in error_msg:
                             await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
                             return
                         elif reason == "api_error":
                             user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
+                            await send_error_with_report(
+                                interaction,
+                                user_msg,
+                                f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr or 'None'}",
+                                "/stats",
+                                f"IGN: {ign}"
+                            )
+                            return
                         else:
                             user_msg = f"Unable to fetch data for `{ign}`.\n\n**Technical details:** {error_msg}"
-                        
-                        await send_error_with_report(
-                            interaction,
-                            user_msg,
-                            f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr or 'None'}",
-                            "/stats",
-                            f"IGN: {ign}"
-                        )
-                        return
+                            await send_error_with_report(
+                                interaction,
+                                user_msg,
+                                f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr or 'None'}",
+                                "/stats",
+                                f"IGN: {ign}"
+                            )
+                            return
                     
                     if json_data and "processed_stats" in json_data and "username" in json_data:
                         await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
@@ -9128,7 +9632,7 @@ async def stats(interaction: discord.Interaction, ign: str = None):
         # Check if this is because they have no Wool Games data
         # This can happen if api_get ran but the player has no stats
         await interaction.followup.send(
-            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
+            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze. Alternatively, chuck managed to corrupt the database again."
         )
         return
 
@@ -10005,8 +10509,15 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
             ign = name
             break
 
-    # If not in cache, fetch fresh stats
-    if not user_data:
+    # Check if user is tracked
+    user_is_tracked = is_tracked_user(ign)
+    
+    # OPTIMIZATION: Tracked users ALWAYS use cached data (no API call)
+    if user_is_tracked and user_data:
+        print(f"[OPTIMIZE] User {ign} is tracked in /sheepwars, using cached data (no API call)")
+        # Continue to display cached data below
+    # For untracked users: only fetch if not in cache
+    elif not user_data:
         result = run_script("api_get.py", ["-ign", ign])
         if result.returncode == 0 and result.stdout:
             try:
@@ -10024,30 +10535,44 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
                 if json_data and json_data.get("skipped"):
                     error_msg = json_data.get("error", "Unknown error")
                     reason = json_data.get("reason", "unknown")
-                    stdout_msg = result.stdout or ""
-                    stderr_msg = result.stderr or ""
-                    full_output = f"STDOUT:\n{stdout_msg}\n\nSTDERR:\n{stderr_msg}"
                     
-                    if "403" in error_msg or "Forbidden" in error_msg:
-                        await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
-                        return
-                    elif "429" in error_msg or "Rate" in error_msg:
-                        user_msg = f"Too many requests to the Hypixel API. Please wait a moment and try again.\n\n**Technical details:** {error_msg}"
-                    elif "404" in error_msg:
-                        user_msg = f"Player `{ign}` not found on Hypixel.\n\n**Technical details:** {error_msg}"
-                    elif reason == "api_error":
-                        user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
+                    # RATE LIMITED - Use cached data instead of showing error
+                    if reason == "rate_limited":
+                        print(f"[DEBUG] Rate limited for {ign} in /sheepwars, using cached data")
+                        # Refresh cache to get latest data (snapshots were written)
+                        cache_data = await STATS_CACHE.get_data()
+                        user_data = None
+                        key = ign.casefold()
+                        for name, data in cache_data.items():
+                            if name.casefold() == key:
+                                user_data = data
+                                ign = name
+                                break
+                        # Continue to show cached data (don't return here)
                     else:
-                        user_msg = f"Unable to fetch data for `{ign}`.\n\n**Technical details:** {error_msg}"
-                    
-                    await send_error_with_report(
-                        interaction,
-                        user_msg,
-                        full_output,
-                        "/sheepwars",
-                        f"IGN: {ign}"
-                    )
-                    return
+                        # Other errors - show error message
+                        stdout_msg = result.stdout or ""
+                        stderr_msg = result.stderr or ""
+                        full_output = f"STDOUT:\n{stdout_msg}\n\nSTDERR:\n{stderr_msg}"
+                        
+                        if "403" in error_msg or "Forbidden" in error_msg:
+                            await interaction.followup.send("Invalid API key. Chuck is slow and probably broke something.")
+                            return
+                        elif "404" in error_msg:
+                            user_msg = f"Player `{ign}` not found on Hypixel.\n\n**Technical details:** {error_msg}"
+                        elif reason == "api_error":
+                            user_msg = f"API Error occurred while fetching data.\n\n**Technical details:** {error_msg}"
+                        else:
+                            user_msg = f"Unable to fetch data for `{ign}`.\n\n**Technical details:** {error_msg}"
+                        
+                        await send_error_with_report(
+                            interaction,
+                            user_msg,
+                            full_output,
+                            "/sheepwars",
+                            f"IGN: {ign}"
+                        )
+                        return
                 
                 if json_data and "processed_stats" in json_data and "username" in json_data:
                     user_data = await STATS_CACHE.update_cache_entry(json_data["username"], json_data["processed_stats"])
@@ -10061,7 +10586,7 @@ async def sheepwars(interaction: discord.Interaction, ign: str = None):
 
     if not user_data:
         await interaction.followup.send(
-            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze."
+            f"`{ign}` has no Wool Games data. They have either never played the game (they are missing out) or on stat freeze. Alternatively, chuck managed to corrupt the database again."
         )
         return
 
