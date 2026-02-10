@@ -519,7 +519,7 @@ def get_rank_color(rank: Optional[str]) -> str:
     Returns hex color code based on rank priority.
     """
     if not rank:
-        return "#FFFFFF"  # White for no rank
+        return "#AAAAAA"  # Gray for no rank
     
     rank_upper = rank.upper()
     
@@ -530,11 +530,11 @@ def get_rank_color(rank: Optional[str]) -> str:
         "MVP_PLUS": "#55FFFF",        # Aqua (b)
         "MVP_PLUS_PLUS": "#FFAA00",   # Gold (6) - MVP++ permanent is gold too
         "MVP": "#55FFFF",             # Aqua (b)
-        "VIP_PLUS": "#00AA00",        # Dark Green (2)
+        "VIP_PLUS": "#55FF55",        # Green (a)
         "VIP": "#55FF55",             # Green (a)
     }
     
-    return rank_colors.get(rank_upper, "#FFFFFF")  # Default to white
+    return rank_colors.get(rank_upper, "#AAAAAA")  # Default to gray
 
 
 def save_user_color_and_rank(username: str, rank: Optional[str], guild_tag: Optional[str] = None, guild_color: Optional[str] = None, guild_name: Optional[str] = None):

@@ -119,3 +119,7 @@ stats.db.corrupted.20260209_181924
 repair_database.py
 verify_guild_setup.py
 test_guild_snapshots.py
+COLOR_FIX_SUMMARY.md
+fix_user_colors.py
+get_guild_members.py
+guild_members_example.json

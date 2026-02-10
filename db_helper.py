@@ -1903,6 +1903,3 @@ def guild_exists(guild_name: str, db_path: Optional[Path] = None) -> bool:
         cursor.execute('SELECT 1 FROM gexp WHERE name = ? LIMIT 1', (guild_name,))
         return cursor.fetchone() is not None
 
-
-
-

@@ -1103,7 +1103,7 @@ _MINECRAFT_256_INDEX = {
 def get_rank_color_hex(rank: Optional[str]) -> str:
     """Get the default hex color for a rank."""
     if not rank:
-        return "#FFFFFF"  # White for no rank/default
+        return "#AAAAAA"  # Gray for no rank/default
     
     rank_upper = rank.upper()
     rank_colors = {
@@ -1112,7 +1112,7 @@ def get_rank_color_hex(rank: Optional[str]) -> str:
         "MVP_PLUS": "#55FFFF",        # Aqua
         "MVP_PLUS_PLUS": "#FFAA00",   # Gold
         "MVP": "#55FFFF",             # Aqua
-        "VIP_PLUS": "#00AA00",        # Dark Green
+        "VIP_PLUS": "#55FF55",        # Green
         "VIP": "#55FF55",             # Green
     }
     return rank_colors.get(rank_upper, "#AAAAAA") # Default to Gray for unlisted ranks
