@@ -123,3 +123,7 @@ COLOR_FIX_SUMMARY.md
 fix_user_colors.py
 get_guild_members.py
 guild_members_example.json
+manual_daily_update.py
+check_snapshots.py
+restore_and_update.sh
+vm_snapshot_check.sh

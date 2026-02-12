@@ -569,6 +569,12 @@ class StatsCache:
             if self.db_path.exists():
                 self.last_mtime = self.db_path.stat().st_mtime
             print(f"[CACHE] Refresh complete. Cached {len(self.data)} users.")
+    
+    async def invalidate(self):
+        """Invalidate cache to force reload on next access."""
+        async with self.lock:
+            self.last_mtime = 0
+            print("[CACHE] Cache invalidated. Will reload on next access.")
 
 STATS_CACHE = StatsCache()
 
@@ -8390,6 +8396,9 @@ async def color(interaction: discord.Interaction, ign: str = None, color: discor
         # Update color in database
         update_user_meta(ign, ign_color=hex_color)
         
+        # Invalidate cache to force reload with new color
+        await STATS_CACHE.invalidate()
+        
         await interaction.followup.send(f"Successfully set {ign}'s username color to {color.name}!", ephemeral=True)
         
     except Exception as e:
@@ -8760,6 +8769,83 @@ async def levelprogress(interaction: discord.Interaction, ign: str = None, level
         )
 
 
+class InstructionsView(discord.ui.View):
+    def __init__(self, instructions_data):
+        super().__init__(timeout=300)  # 5 minutes timeout
+        self.data = instructions_data
+        self.current_section = "home"
+        self.message = None
+        self.update_button_styles()
+    
+    async def on_timeout(self):
+        """Remove buttons when the view times out."""
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
+    
+    def update_button_styles(self):
+        """Update button styles based on current section."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == self.current_section:
+                    child.style = discord.ButtonStyle.primary
+                else:
+                    child.style = discord.ButtonStyle.secondary
+    
+    def get_embed(self):
+        """Generate embed for current section."""
+        section_data = self.data.get(self.current_section, {})
+        
+        embed = discord.Embed(
+            title=section_data.get("title", "🐑 Sheep Wars Bot"),
+            description=section_data.get("description", "Select a section below."),
+            color=discord.Color.blue()
+        )
+        
+        # Add fields if any
+        for field in section_data.get("fields", []):
+            embed.add_field(
+                name=field["name"],
+                value=field["value"],
+                inline=field.get("inline", False)
+            )
+        
+        embed.set_footer(text=section_data.get("footer", "Use the buttons below to navigate"))
+        return embed
+    
+    @discord.ui.button(label="🏠 Home", custom_id="home", row=0)
+    async def home_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_section = "home"
+        self.update_button_styles()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="📊 Stats", custom_id="stats", row=0)
+    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_section = "stats"
+        self.update_button_styles()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="🏆 Leaderboards", custom_id="leaderboards", row=0)
+    async def leaderboards_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_section = "leaderboards"
+        self.update_button_styles()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="⚙️ Utility", custom_id="utility", row=1)
+    async def utility_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_section = "utility"
+        self.update_button_styles()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="👑 Admin", custom_id="admin", row=1)
+    async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_section = "admin"
+        self.update_button_styles()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+
 @bot.tree.command(name="instructions", description="Display bot usage instructions")
 async def instructions(interaction: discord.Interaction):
     if not interaction.response.is_done():
@@ -8769,22 +8855,76 @@ async def instructions(interaction: discord.Interaction):
             return
     
     try:
-        instructions_file = BOT_DIR / "instructions.txt"
-        if not instructions_file.exists():
-            await interaction.followup.send("[ERROR] Instructions file not found")
-            return
+        # Define sections with organized content from instructions.txt
+        instructions_data = {
+            "home": {
+                "title": "🐑 Sheep Wars Bot — Quick Start Guide",
+                "description": "Welcome! This bot tracks Sheep Wars statistics, leaderboards, and player data.\n\n**Getting Started:**",
+                "fields": [
+                    {"name": "1️⃣ Track a Player", "value": "`/track ign:<username>`\nCreates database entry and snapshots. Does not recover historic data.\nTracked players appear in non-lifetime leaderboards.", "inline": False},
+                    {"name": "2️⃣ Claim Your IGN (Optional)", "value": "`/claim ign:<username>`\nLinks Minecraft username to Discord. Requires admin approval.\nAllows you to manage your profile (reset session, set color, etc.).", "inline": False},
+                    {"name": "3️⃣ Set Default IGN", "value": "`/default ign:<username>`\nSaves default IGN so commands work without typing it each time.\nRemove with `/removedefault`", "inline": False},
+                    {"name": "📚 Navigation", "value": "**📊 Stats** - View player statistics\n**🏆 Leaderboards** - Rankings and comparisons\n**⚙️ Utility** - Setup and personalization\n**👑 Admin** - Administrator commands", "inline": False},
+                ],
+                "footer": "Note: This is a vibe coded bot, bugs are normal • Buttons expire after 5 minutes"
+            },
+            "stats": {
+                "title": "📊 Statistics Commands",
+                "description": "View detailed player statistics across different game modes and time periods.",
+                "fields": [
+                    {"name": "/sheepwars ign:<username>", "value": "Sheep Wars stats rendered as image. Periods: all-time, session, daily, yesterday, weekly, monthly.", "inline": False},
+                    {"name": "/ww ign:<username>", "value": "Wool Wars stats with class breakdown and interactive class selector.", "inline": False},
+                    {"name": "/ctw ign:<username>", "value": "Capture The Wool stats (wools captured, kills on wool holder, gold earned/spent).", "inline": False},
+                    {"name": "/stats ign:<username>", "value": "Full sheep wars layout showing many boxes and derived metrics.", "inline": False},
+                    {"name": "/compare ign1:<u1> ign2:<u2> [stat:<metric>]", "value": "Compare two players. Without stat shows full comparison; with stat focuses on that metric.", "inline": False},
+                    {"name": "/levelprogress ign:<username> [level:<target>]", "value": "Progress to next level/prestige with ETA based on recent exp/hour.", "inline": False},
+                    {"name": "/ratios ign:<username>", "value": "Predicts wins/kills and time to reach next WLR (W/L) and KDR (K/D) milestones.", "inline": False},
+                    {"name": "/streak ign:<username>", "value": "View current win/kill streaks (requires streak tracking approval).", "inline": False},
+                    {"name": "/layout ign:<username>", "value": "View hotbar/hotkey layouts for Sheep Wars, Wool Wars, and CTW.", "inline": False},
+                    {"name": "/killdistribution & /deathdistribution", "value": "Render kill-type or death-type distribution as pie chart.", "inline": False},
+                ],
+                "footer": "💡 Uses cached data for tracked users, fetches live for untracked when possible"
+            },
+            "leaderboards": {
+                "title": "🏆 Leaderboards & Rankings",
+                "description": "View rankings, compare positions, and explore top players.",
+                "fields": [
+                    {"name": "/leaderboard <category> metric:<metric>", "value": "Categories: **general**, **sheepwars**, **ctw**, **ww**, **guild**\nPeriods: lifetime, session, daily, yesterday, weekly, monthly\nResults are paged and searchable with interactive UI.", "inline": False},
+                    {"name": "/rankings <category> ign:<username>", "value": "Show player's rank for every metric in that category across all periods.", "inline": False},
+                    {"name": "/rankings guild guild_name:<guild>", "value": "Show guild's rank across game types and periods.", "inline": False},
+                ],
+                "footer": "Tracked players receive periodic snapshot updates for time-based leaderboards"
+            },
+            "utility": {
+                "title": "⚙️ Utility & Personalization",
+                "description": "Setup, customization, and account management commands.",
+                "fields": [
+                    {"name": "Account Management", "value": "`/track ign:<username>` - Start tracking\n`/claim ign:<username>` - Link to Discord (needs approval)\n`/unclaim` - Unlink from Discord\n`/default ign:<username>` - Set default IGN\n`/removedefault` - Remove default", "inline": False},
+                    {"name": "Customization", "value": "`/color ign:<username> color:<choice>` - Set display color\n`/reset ign:<username>` - Reset session snapshot\n`/streak-remove ign:<username>` - Stop streak tracking", "inline": False},
+                    {"name": "Other Utilities", "value": "`/dmme` - Test DM from bot\n`/prestige level:<number>` - Preview prestige bracket\n`/version` - Bot uptime and path\n`/api-stats` - Hypixel API usage statistics", "inline": False},
+                ],
+                "footer": "💡 Only claiming user or admin can change colors/settings for an IGN"
+            },
+            "admin": {
+                "title": "👑 Administrator Commands",
+                "description": "Admin-only commands for managing users, guilds, and database.",
+                "fields": [
+                    {"name": "User Management", "value": "`/add ign:<username>` or `ignswithcommas:<u1,u2,...>`\nAdds users without periodic tracking.\n\n`/remove ign:<Exact_Case_Username>` - Force-remove tracked user (case-sensitive)", "inline": False},
+                    {"name": "Guild Management", "value": "`/trackguild` - Track a guild\n`/untrackguild` - Stop tracking guild\n`/updateguilds` - Refresh guild metadata\n`/fixguildtracking`, `/fixguilds` - Repair guild data", "inline": False},
+                    {"name": "Snapshots & Updates", "value": "`/refresh mode:<...> [ign:<username>]` - Manual snapshot trigger\nModes: batch or single-user (requires permission)", "inline": False},
+                    {"name": "Verification", "value": "`/verification user:<id> option:<accept|deny>` - Approve/deny claims\n`/verification-streak` - Handle streak tracking requests", "inline": False},
+                    {"name": "Database", "value": "`/repairdatabase` - Check integrity, attempt repair/restore from backups (requires confirmation)", "inline": False},
+                    {"name": "Monitoring", "value": "`/whatamirunningon` - Creator-only: IP and bot path", "inline": False},
+                ],
+                "footer": "⚠️ Admin commands require proper permissions"
+            }
+        }
         
-        with open(instructions_file, "r", encoding="utf-8") as f:
-            content = f.read()
+        view = InstructionsView(instructions_data)
+        embed = view.get_embed()
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
         
-        # Discord has a 2000 character limit for messages
-        if len(content) > 1900:
-            # Split into chunks if needed
-            chunks = [content[i:i+1900] for i in range(0, len(content), 1900)]
-            for chunk in chunks:
-                await interaction.followup.send(chunk)
-        else:
-            await interaction.followup.send(content)
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 

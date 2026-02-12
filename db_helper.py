@@ -513,7 +513,11 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
     
     This returns the format expected by the bot:
     - lifetime: current value from API
-    - session/daily/yesterday/monthly: calculated deltas (lifetime - snapshot)
+    - session: lifetime - session_snap
+    - daily: lifetime - daily_snap (today's gains so far)
+    - yesterday: daily_snap - yesterday_snap (yesterday's gains only)
+    - weekly: lifetime - weekly_snap
+    - monthly: lifetime - monthly_snap
     
     Args:
         username: Username to query
@@ -547,7 +551,7 @@ def get_user_stats_with_deltas(username: str) -> Dict[str, Dict[str, float]]:
                     'lifetime': lifetime,
                     'session': lifetime - session_snap,
                     'daily': lifetime - daily_snap,
-                    'yesterday': lifetime - yesterday_snap,
+                    'yesterday': daily_snap - yesterday_snap,  # Yesterday's gains only (daily snapshot - yesterday snapshot)
                     'weekly': lifetime - weekly_snap,
                     'monthly': lifetime - monthly_snap
                 }
