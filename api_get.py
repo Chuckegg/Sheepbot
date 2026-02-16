@@ -488,6 +488,16 @@ def extract_wool_games_all(player_json: Dict) -> Dict:
         for k, v in ctw_stats.items():
             if isinstance(v, (int, float)):
                 flat[f"ctw_{k}"] = v
+        
+        # Calculate games_played (experienced wins + experienced losses)
+        # Note: ctw_experienced_draws is provided by the API directly
+        experienced_wins = flat.get("ctw_experienced_wins", 0)
+        experienced_losses = flat.get("ctw_experienced_losses", 0)
+        flat["ctw_games_played"] = experienced_wins + experienced_losses
+        
+        # Use experienced_draws from API if available, otherwise default to 0
+        if "ctw_experienced_draws" not in flat:
+            flat["ctw_experienced_draws"] = 0
 
     # ===== WOOL WARS STATS =====
     ww_data = wool.get("wool_wars", {}) or {}

@@ -6899,6 +6899,7 @@ class RatioLeaderboardView(discord.ui.View):
             "session": "C",       # Session Delta
             "daily": "E",         # Daily Delta
             "yesterday": "G",     # Yesterday Delta
+            "weekly": "H",        # Weekly Delta
             "monthly": "I",       # Monthly Delta
         }
         
@@ -7118,6 +7119,7 @@ class RatioPeriodSelect(discord.ui.Select):
             discord.SelectOption(label="Session", value="session"),
             discord.SelectOption(label="Daily", value="daily"),
             discord.SelectOption(label="Yesterday", value="yesterday"),
+            discord.SelectOption(label="Weekly", value="weekly"),
             discord.SelectOption(label="Monthly", value="monthly"),
         ]
         super().__init__(
@@ -11018,12 +11020,8 @@ async def ctw(interaction: discord.Interaction, ign: str = None):
         gold_earned = stats.get("ctw_gold_earned", {}).get(cache_key, 0)
         gold_spent = stats.get("ctw_gold_spent", {}).get(cache_key, 0)
         
-        # Calculate draws (participated games minus experienced games)
-        participated_wins = stats.get("ctw_participated_wins", {}).get(cache_key, 0)
-        participated_losses = stats.get("ctw_participated_losses", {}).get(cache_key, 0)
-        total_participated = participated_wins + participated_losses
-        total_experienced = w + l
-        draws = max(0, total_participated - total_experienced)
+        # Get draws directly from API (ctw_experienced_draws)
+        draws = stats.get("ctw_experienced_draws", {}).get(cache_key, 0)
         
         all_data[tab] = {
             'wins': w, 'losses': l, 'draws': draws,
@@ -11135,8 +11133,10 @@ CATEGORY_METRICS = {
         "ctw_gold_spent": "Gold Spent",
         "ctw_experienced_wins": "Experienced Wins",
         "ctw_experienced_losses": "Experienced Losses",
+        "ctw_experienced_draws": "Draws",
         "ctw_participated_wins": "Participated Wins",
         "ctw_participated_losses": "Participated Losses",
+        "ctw_games_played": "Games Played",
         "ctw_fastest_win": "Fastest Win",
         "ctw_fastest_wool_capture": "Fastest Wool Capture",
         "ctw_longest_game": "Longest Game",

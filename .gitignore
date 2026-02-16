@@ -127,3 +127,4 @@ manual_daily_update.py
 check_snapshots.py
 restore_and_update.sh
 vm_snapshot_check.sh
+fix_ctw_draws.py
