@@ -389,11 +389,47 @@ def _get_font_path(font_name: str) -> str:
     return font_name
 
 def _load_font(font_name: str, font_size: int):
+    """Load a font from the fonts directory."""
     path = os.path.join(BOT_DIR, 'fonts', font_name)
     try:
         return ImageFont.truetype(path, font_size)
     except:
         return ImageFont.load_default()
+
+def _load_font_with_fallback(font_name: str, font_size: int):
+    """Load primary font and fallback font for emoji/symbol support."""
+    primary = _load_font(font_name, font_size)
+    
+    # Try to load a font with better symbol support as fallback
+    fallback = None
+    try:
+        # Try Noto Sans which has good symbol coverage
+        noto_path = '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf'
+        if os.path.exists(noto_path):
+            fallback = ImageFont.truetype(noto_path, font_size)
+    except:
+        pass
+    
+    return primary, fallback
+
+def _draw_text_with_fallback(draw, xy, text, font, fallback_font, fill):
+    """Draw text trying primary font, falling back to secondary for unsupported chars."""
+    if fallback_font is None:
+        draw.text(xy, text, font=font, fill=fill)
+        return
+    
+    # Check each character and use fallback for symbols that don't render well
+    x, y = xy
+    for char in text:
+        # These are characters known to have issues with DejaVu but work in Noto
+        needs_fallback = ord(char) > 0x2000 and ord(char) not in range(0x20, 0x7F)
+        
+        current_font = fallback_font if needs_fallback else font
+        draw.text((x, y), char, font=current_font, fill=fill)
+        
+        # Get bbox to advance x position
+        bbox = draw.textbbox((x, y), char, font=current_font)
+        x = bbox[2]
 
 LOCK_FILE = str(BOT_DIR / "stats.xlsx.lock")  # Kept for backward compatibility
 DB_FILE = BOT_DIR / "stats.db"
@@ -781,7 +817,7 @@ PRESTIGE_COLORS = {
     600: (0, 170, 170),      # DARK_AQUA (§3)
     700: (170, 0, 170),      # DARK_PURPLE (§5)
     800: (255, 85, 255),     # LIGHT_PURPLE (§d)
-    900: None,               # Rainbow (special handling)
+    900: None,               # Rainbow
     1000: (255, 255, 255),   # WHITE (§f)
     1100: (170, 170, 170),   # &7 -> GRAY
     1200: (255, 85, 85),     # &c -> RED
@@ -792,35 +828,35 @@ PRESTIGE_COLORS = {
     1700: (255, 85, 255),    # &d -> LIGHT_PURPLE
     1800: (170, 0, 170),     # &5 -> DARK_PURPLE
     1900: None,              # Rainbow
-    2000: (0, 170, 0),       # &2 -> DARK_GREEN
-    2100: (170, 170, 170),   # &7 -> GRAY
-    2200: (255, 255, 85),    # &e -> YELLOW
-    2300: (255, 255, 85),    # &e -> YELLOW
-    2400: (85, 255, 255),    # &b -> AQUA
-    2500: (85, 255, 85),     # &a -> GREEN
-    2600: (85, 255, 255),    # &b -> AQUA
-    2700: (255, 85, 255),    # &d -> LIGHT_PURPLE
-    2800: (170, 0, 170),     # &5 -> DARK_PURPLE
+    2000: None,              # Rainbow (multi-color pattern)
+    2100: None,              # Rainbow (multi-color pattern)
+    2200: None,              # Rainbow (multi-color pattern)
+    2300: None,              # Rainbow (multi-color pattern)
+    2400: None,              # Rainbow (multi-color pattern)
+    2500: None,              # Rainbow (multi-color pattern)
+    2600: None,              # Rainbow (multi-color pattern)
+    2700: None,              # Rainbow (multi-color pattern)
+    2800: None,              # Rainbow (multi-color pattern)
     2900: None,              # Rainbow
-    3000: (0, 0, 0),         # &0 -> BLACK
-    3100: (255, 255, 255),   # &f -> WHITE
-    3200: (255, 85, 85),     # &c -> RED
-    3300: (255, 170, 0),     # &6 -> GOLD
-    3400: (255, 255, 85),    # &e -> YELLOW
-    3500: (85, 255, 85),     # &a -> GREEN
-    3600: (0, 170, 170),     # &3 -> DARK_AQUA
-    3700: (255, 85, 255),    # &d -> LIGHT_PURPLE
-    3800: (170, 0, 170),     # &5 -> DARK_PURPLE
+    3000: None,              # Rainbow (multi-color pattern)
+    3100: None,              # Rainbow (multi-color pattern)
+    3200: None,              # Rainbow (multi-color pattern)
+    3300: None,              # Rainbow (multi-color pattern)
+    3400: None,              # Rainbow (multi-color pattern)
+    3500: None,              # Rainbow (multi-color pattern)
+    3600: None,              # Rainbow (multi-color pattern)
+    3700: None,              # Rainbow (multi-color pattern)
+    3800: None,              # Rainbow (multi-color pattern)
     3900: None,              # Rainbow
-    4000: (85, 85, 85),      # &8 -> DARK_GRAY
-    4100: (255, 255, 255),   # &f -> WHITE
-    4200: (255, 85, 85),     # &c -> RED
-    4300: (255, 170, 0),     # &6 -> GOLD
-    4400: (255, 255, 85),    # &e -> YELLOW
-    4500: (85, 255, 85),     # &a -> GREEN
-    4600: (0, 170, 170),     # &3 -> DARK_AQUA
-    4700: (255, 85, 255),    # &d -> LIGHT_PURPLE
-    4800: (170, 0, 170),     # &5 -> DARK_PURPLE
+    4000: None,              # Rainbow (multi-color pattern)
+    4100: (255, 255, 255),   # &f -> WHITE (single color)
+    4200: (255, 85, 85),     # &c -> RED (single color)
+    4300: (255, 170, 0),     # &6 -> GOLD (single color)
+    4400: (255, 255, 85),    # &e -> YELLOW (single color)
+    4500: (85, 255, 85),     # &a -> GREEN (single color)
+    4600: (0, 170, 170),     # &3 -> DARK_AQUA (single color)
+    4700: (255, 85, 255),    # &d -> LIGHT_PURPLE (single color)
+    4800: (170, 0, 170),     # &5 -> DARK_PURPLE (single color)
     4900: None,              # Rainbow
     5000: None,              # Rainbow (High level default)
 }
@@ -1145,7 +1181,7 @@ PRESTIGE_RAW_PATTERNS = {
     900: "&c[&69&e0&a0&b✏&d]",
     1000: "&0[&f1000☯&0]",
     1100: "&0[&81100☃️&0]",
-    1200: "&0[&c1200۞&0]",
+    1200: "&0[&c1200✤&0]",
     1300: "&0[&61300✤&0]",
     1400: "&0[&e1400♫&0]",
     1500: "&0[&a1500♚&0]",
@@ -1163,7 +1199,7 @@ PRESTIGE_RAW_PATTERNS = {
     2700: "&f[2&d700&5✦]",
     2800: "&c[2&480&50&d✉]",
     2900: "&d[&52&39&a0&e0&6✉&c]",
-    3000: "&f[&03&80&00&80&0ツ&f]",
+    3000: "&f[&03&80&00&80&0❣&f]",
     3100: "&0[&f3&71&f0&70&f❣&0]",
     3200: "&0[&c3&42&c0&40&c✮&0]",
     3300: "&0[&63&c3&60&c0&6✿&0]",
@@ -2920,12 +2956,12 @@ def create_distribution_pie(title: str, slices: list) -> io.BytesIO:
 
 
 def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
-    """Render an image showing the colored start and end prestige brackets from raw pattern."""
+    """Render an image showing the colored prestige bracket for the base level only."""
     raw = PRESTIGE_RAW_PATTERNS.get(base)
     if not raw:
         # Fallback to simple text
-        parts = [(MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f'[{base}] - [{end_display}]')]
-        return _render_text_segments_to_image(parts)
+        parts = [(MINECRAFT_CODE_TO_HEX.get('f', '#FFFFFF'), f'[{base}]')]
+        return _render_text_segments_to_image(parts, padding=(6,4))
 
     parts = _parse_raw_pattern(raw)
 
@@ -3002,16 +3038,16 @@ def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
         return out_parts
 
     # Choose fallback icons for bases where emoji fonts may be missing
-    BAD_ICON_BASES = {800, 1200, 1800, 2800, 3800}
+    # 1200 = Arabic character ۞, 3000 = Japanese character ツ
+    BAD_ICON_BASES = {800, 1200, 1800, 2800, 3000, 3800}
 
     # Determine if this prestige base should be rainbow (PRESTIGE_COLORS maps to None)
     rainbow_bases = {k for k, v in PRESTIGE_COLORS.items() if v is None}
 
-    start_segments = _build_replaced_segments(parts, str(base), rainbow=(base in rainbow_bases))
-    end_segments = _build_replaced_segments(parts, str(end_display), rainbow=(end_display in rainbow_bases))
+    segments = _build_replaced_segments(parts, str(base), rainbow=(base in rainbow_bases))
 
     # If problematic base, replace any non-ascii icon with fallback from PRESTIGE_ICONS
-    if base in BAD_ICON_BASES or end_display in BAD_ICON_BASES:
+    if base in BAD_ICON_BASES:
         def _replace_bad_icons(segments, base_val):
             res = []
             for col, txt in segments:
@@ -3019,15 +3055,9 @@ def render_prestige_range_image(base: int, end_display: int) -> io.BytesIO:
                 newtxt = re.sub(r"\[(\s*\d+)([^\d\]]+)\]", lambda m: f"[{m.group(1)}{PRESTIGE_ICONS[(base_val//100) % len(PRESTIGE_ICONS)]}]", txt)
                 res.append((col, newtxt))
             return res
-        start_segments = _replace_bad_icons(start_segments, base)
-        end_segments = _replace_bad_icons(end_segments, base)
+        segments = _replace_bad_icons(segments, base)
 
-    combined = []
-    combined.extend(start_segments)
-    combined.append((MINECRAFT_CODE_TO_HEX.get('7', '#AAAAAA'), ' -> '))
-    combined.extend(end_segments)
-
-    return _render_text_segments_to_image(combined)
+    return _render_text_segments_to_image(segments, padding=(6,4))
 
 
 def render_all_prestiges_combined(spacing: int = 20) -> io.BytesIO:
@@ -3053,15 +3083,15 @@ def render_all_prestiges_combined(spacing: int = 20) -> io.BytesIO:
                     imgio.seek(0)
                     im = Image.open(imgio).convert('RGBA')
                 except Exception:
-                    im = Image.new('RGBA', (200, 40), (0,0,0,0))
+                    im = Image.new('RGBA', (120, 30), (0,0,0,0))
             else:
-                im = Image.new('RGBA', (200, 40), (0,0,0,0))
+                im = Image.new('RGBA', (120, 30), (0,0,0,0))
             row_imgs.append(im)
         grid.append(row_imgs)
 
     # Compute uniform cell size
-    max_w = max((im.width for row in grid for im in row), default=200) + 30
-    max_h = max((im.height for row in grid for im in row), default=40) + 20
+    max_w = max((im.width for row in grid for im in row), default=120) + 20
+    max_h = max((im.height for row in grid for im in row), default=30) + 12
 
     # Optional title at the top
     title_text = "Wool Games Prestiges"
@@ -3077,9 +3107,10 @@ def render_all_prestiges_combined(spacing: int = 20) -> io.BytesIO:
     cols = len(offsets)
     rows = len(grid)
 
-    margin = 40
+    margin = 30
+    spacing = 12
     total_w = margin * 2 + cols * max_w + spacing * (cols - 1)
-    total_h = margin * 2 + title_h + rows * max_h + spacing * (rows - 1) + 40
+    total_h = margin * 2 + title_h + rows * max_h + spacing * (rows - 1) + 30
 
     combined = Image.new('RGBA', (total_w, total_h), (18, 18, 20, 255))
     draw = ImageDraw.Draw(combined)
@@ -12908,16 +12939,14 @@ async def prestiges(interaction: discord.Interaction):
                         fname = f"prestige_{base}.png"
                         await interaction.followup.send(file=discord.File(imgio, filename=fname))
                     except Exception:
-                        start_str = format_prestige_ansi(base, '')
-                        end_str = format_prestige_ansi(end_display, '')
-                        await interaction.followup.send(f"{start_str} - {end_str}")
+                        prestige_str = format_prestige_ansi(base, '')
+                        await interaction.followup.send(prestige_str)
         else:
             # Pillow not installed; fallback to ANSI list
             lines = []
             for base in sorted(PRESTIGE_RAW_PATTERNS.keys()):
-                start_str = format_prestige_ansi(base, '')
-                end_str = format_prestige_ansi(base + 99, '')
-                lines.append(f"{start_str} - {end_str}")
+                prestige_str = format_prestige_ansi(base, '')
+                lines.append(prestige_str)
             await _send_paged_ansi_followups(interaction, lines, block='ansi')
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
