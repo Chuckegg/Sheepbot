@@ -51,7 +51,9 @@ from db_helper import (
     update_guild_exp,
     get_guild_exp,
     get_all_guilds,
-    guild_exists
+    guild_exists,
+    log_guild_historical_snapshot,
+    get_guild_historical_data
 )
 import re
 import shutil
@@ -3876,6 +3878,8 @@ async def guild_updater_hourly():
     This runs on a 1-hour interval to fetch guild tag/color/exp data for guilds
     of tracked users, reducing API pressure while keeping guild data reasonably fresh.
     """
+    from api_get import api_update_guild_database
+    
     # Wait 5 minutes before first run to let the bot stabilize
     await asyncio.sleep(300)
     
@@ -3887,7 +3891,10 @@ async def guild_updater_hourly():
             tracked_users = await asyncio.to_thread(load_tracked_users)
             user_colors = await asyncio.to_thread(load_user_colors)
             
-            guilds_to_update = set()
+            # Always include explicitly tracked guilds
+            guilds_to_update = set(await asyncio.to_thread(get_tracked_guilds))
+            
+            # Also include guilds of tracked users
             for username in tracked_users:
                 user_meta = user_colors.get(username.lower(), {})
                 guild_name = user_meta.get('guild_name')
@@ -3902,16 +3909,16 @@ async def guild_updater_hourly():
                 
                 for guild_name in guilds_to_update:
                     try:
-                        # Use batch_update.py to update guild (it has built-in API tracking)
+                        # Update guild data (without resetting snapshots - periodic updates maintain existing deltas)
                         result = await asyncio.to_thread(
-                            run_script, "batch_update.py", ["--guild", guild_name]
+                            api_update_guild_database, guild_name, None, None
                         )
                         
-                        if result and result.returncode == 0:
+                        if 'error' not in result:
                             await API_TRACKER.log_request('guild')
                             print(f"[GUILD_UPDATE] Successfully updated guild: {guild_name}")
                         else:
-                            print(f"[GUILD_UPDATE] Failed to update guild: {guild_name}")
+                            print(f"[GUILD_UPDATE] Failed to update guild {guild_name}: {result.get('error', 'Unknown error')}")
                         
                         # Wait before next guild
                         await asyncio.sleep(interval_per_guild)
@@ -9005,6 +9012,407 @@ async def version(interaction: discord.Interaction):
     minutes, seconds = divmod(rem, 60)
     
     await interaction.followup.send(f"Bot Uptime: {hours}h {minutes}m {seconds}s\nRunning from: {BOT_DIR}", ephemeral=True)
+
+
+# ==============================
+# TIMELINE COMMAND
+# ==============================
+
+async def guild_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
+    """Autocomplete for guilds that have historical data."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT DISTINCT name FROM guild_historical ORDER BY name')
+        guilds = [row['name'] for row in cursor.fetchall()]
+    
+    current_lower = current.lower()
+    matches = [
+        discord.app_commands.Choice(name=guild, value=guild)
+        for guild in guilds
+        if current_lower in guild.lower()
+    ]
+    return matches[:25]
+
+
+def generate_timeline_graph(guild_name: str, game: str, show_delta: bool = False, width: int = 920, height: int = 520):
+    """Generate a timeline graph similar to the reference image.
+    
+    Args:
+        guild_name: Name of the guild
+        game: Game type (e.g., 'GENERAL', 'WOOL_WARS')
+        show_delta: If True, show daily change instead of absolute values
+        width: Image width in pixels
+        height: Image height in pixels
+    
+    Returns:
+        BytesIO: PNG image data
+    """
+    from datetime import datetime
+    import io
+    
+    # Get historical data
+    history = get_guild_historical_data(guild_name, game=game)
+    
+    # Filter out zero values
+    history = [record for record in history if record['lifetime_exp'] > 0]
+    
+    if not history or len(history) < 2:
+        # Create error image
+        img = Image.new('RGB', (width, height), (18, 18, 20))
+        draw = ImageDraw.Draw(img)
+        try:
+            error_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except:
+            error_font = ImageFont.load_default()
+        text = "No historical data available" if not history else "Insufficient data (need at least 2 data points)"
+        bbox = draw.textbbox((0, 0), text, font=error_font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        draw.text(((width - text_width) // 2, (height - text_height) // 2), text, fill=(200, 100, 100), font=error_font)
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return buf
+    
+    # Extract data points
+    timestamps = [record['timestamp'] for record in history]
+    exp_values = [record['lifetime_exp'] for record in history]
+    
+    # Calculate values to display (either absolute or delta)
+    if show_delta:
+        # Calculate daily changes
+        display_values = [0]  # First value has no previous, so delta is 0
+        for i in range(1, len(exp_values)):
+            delta = exp_values[i] - exp_values[i-1]
+            display_values.append(delta)
+    else:
+        display_values = exp_values
+    
+    # Calculate statistics
+    start_exp = exp_values[0]
+    end_exp = exp_values[-1]
+    total_gain = end_exp - start_exp
+    avg_per_day = total_gain / (len(history) - 1) if len(history) > 1 else 0
+    
+    # Create image
+    bg_color = (24, 28, 38)
+    img = Image.new('RGB', (width, height), bg_color)
+    draw = ImageDraw.Draw(img)
+    
+    # Margins
+    margin_left = 80
+    margin_right = 40
+    margin_top = 100
+    margin_bottom = 80
+    
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    
+    # Calculate scales with padding
+    min_val = min(display_values)
+    max_val = max(display_values)
+    
+    # For delta view, include 0 in the range if there are negative values
+    if show_delta and min_val < 0:
+        min_val = min(min_val, 0)
+        max_val = max(max_val, 0)
+    
+    # Add padding above and below (10% on each side)
+    val_range = max_val - min_val if max_val != min_val else 1
+    padding = val_range * 0.1
+    min_val -= padding
+    max_val += padding
+    val_range = max_val - min_val
+    
+    min_time = min(timestamps)
+    max_time = max(timestamps)
+    time_range = max_time - min_time if max_time != min_time else 1
+    
+    # Transform data to pixel coordinates
+    points = []
+    for ts, val in zip(timestamps, display_values):
+        x = margin_left + int((ts - min_time) / time_range * plot_width)
+        y = margin_top + plot_height - int((val - min_val) / val_range * plot_height)
+        points.append((x, y))
+    
+    # Draw filled area under the line with gradient effect
+    # Create vertical gradient fill effect (darker at bottom, brighter at top)
+    for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            
+            # Draw gradient segments vertically from bottom to line
+            bottom_y = height - margin_bottom
+            
+            # Use the full height from bottom to the line
+            num_segments = 50
+            
+            for seg in range(num_segments):
+                # Calculate segment boundaries (from bottom going up)
+                seg_y_start = bottom_y - (bottom_y - bottom_y) * seg / num_segments
+                seg_y_end = bottom_y - (bottom_y - bottom_y) * (seg + 1) / num_segments
+                
+                # Calculate the line position at this height
+                # Linear interpolation between y1 and y2
+                line_y1 = y1 + (bottom_y - y1) * (num_segments - seg) / num_segments
+                line_y2 = y2 + (bottom_y - y2) * (num_segments - seg) / num_segments
+                line_y1_next = y1 + (bottom_y - y1) * (num_segments - seg - 1) / num_segments
+                line_y2_next = y2 + (bottom_y - y2) * (num_segments - seg - 1) / num_segments
+                
+                # Calculate color gradient (darker at bottom, brighter at top)
+                # Factor goes from 0 (bottom) to 1 (top)
+                gradient_factor = seg / num_segments
+                
+                # Darker, more subtle blue gradient
+                r = int(25 + 35 * gradient_factor)
+                g = int(50 + 80 * gradient_factor)  
+                b = int(75 + 105 * gradient_factor)
+                
+                fill_color = (r, g, b)
+                
+                # Draw trapezoid segment that follows the line
+                polygon = [
+                    (x1, line_y1),
+                    (x2, line_y2),
+                    (x2, line_y2_next),
+                    (x1, line_y1_next)
+                ]
+                draw.polygon(polygon, fill=fill_color)
+    
+    # Draw the line connecting points
+    line_color = (100, 180, 255)
+    for i in range(len(points) - 1):
+        if show_delta:
+            # Color based on value
+            if display_values[i] < 0:
+                line_color = (255, 100, 100)
+            else:
+                line_color = (100, 180, 255)
+        draw.line([points[i], points[i + 1]], fill=line_color, width=3)
+    
+    # Draw points (circles) on the line
+    point_radius = 4
+    for i, (x, y) in enumerate(points):
+        if show_delta:
+            point_color = (255, 100, 100) if display_values[i] < 0 else (100, 180, 255)
+        else:
+            point_color = (100, 180, 255)
+        
+        # Draw filled circle
+        draw.ellipse([x - point_radius, y - point_radius, x + point_radius, y + point_radius], 
+                    fill=point_color, outline=point_color)
+    
+    # Draw zero line for delta view
+    if show_delta and min_val < 0:
+        zero_y = margin_top + plot_height - int((0 - min_val) / val_range * plot_height)
+        draw.line([(margin_left, zero_y), (width - margin_right, zero_y)], fill=(100, 100, 100), width=2)
+    
+    # Load font (try to use a better font if available)
+    try:
+        title_font = ImageFont.truetype("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf", 26)
+        label_font = ImageFont.truetype("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", 16)
+        subtitle_font = ImageFont.truetype("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", 16)
+    except Exception as e:
+        print(f"Font loading error: {e}")
+        title_font = ImageFont.load_default()
+        label_font = ImageFont.load_default()
+        subtitle_font = ImageFont.load_default()
+    
+    # Format game name
+    game_names = {
+        'GENERAL': 'General',
+        'CTW': 'CTW',
+        'WOOL_WARS': 'Wool Wars',
+        'CTF': 'CTF',
+        'BRIDGE': 'Bridge',
+        'DESTROY': 'Destroy'
+    }
+    game_display = game_names.get(game, game.replace('_', ' ').title())
+    
+    # Draw title (same format for both delta and absolute modes)
+    title = f"{game_display} Experience · {guild_name}"
+    
+    subtitle = f"{start_exp:,.0f} → {end_exp:,.0f} (+{total_gain:,.0f}) · Avg/day +{avg_per_day:,.1f}"
+    
+    draw.text((margin_left, 20), title, fill=(255, 255, 255), font=title_font)
+    draw.text((margin_left, 78), subtitle, fill=(160, 160, 165), font=subtitle_font)
+    
+    # Draw Y-axis labels
+    num_y_labels = 5
+    for i in range(num_y_labels):
+        value = min_val + (val_range * i / (num_y_labels - 1))
+        y = margin_top + plot_height - int((value - min_val) / val_range * plot_height)
+        
+        # Format large numbers
+        if abs(value) >= 1_000_000:
+            label = f"{value / 1_000_000:+.1f}M" if show_delta else f"{value / 1_000_000:.1f}M"
+        elif abs(value) >= 1_000:
+            label = f"{value / 1_000:+.1f}K" if show_delta else f"{value / 1_000:.1f}K"
+        else:
+            label = f"{value:+.0f}" if show_delta else f"{value:.0f}"
+        
+        draw.text((10, y - 8), label, fill=(150, 150, 150), font=label_font)
+        draw.line([(margin_left, y), (width - margin_right, y)], fill=(40, 40, 50), width=1)
+    
+    # Draw X-axis labels (dates)
+    num_x_labels = min(5, len(points))
+    for i in range(num_x_labels):
+        idx = int(i * (len(history) - 1) / (num_x_labels - 1)) if num_x_labels > 1 else 0
+        ts = timestamps[idx]
+        date_str = datetime.fromtimestamp(ts).strftime('%m/%d')
+        x = points[idx][0]
+        
+        bbox = draw.textbbox((0, 0), date_str, font=label_font)
+        text_width = bbox[2] - bbox[0]
+        draw.text((x - text_width // 2, height - margin_bottom + 15), date_str, fill=(150, 150, 150), font=label_font)
+    
+    # Draw start and end dates at bottom
+    start_date = datetime.fromtimestamp(timestamps[0]).strftime('%Y-%m-%d')
+    end_date = datetime.fromtimestamp(timestamps[-1]).strftime('%Y-%m-%d')
+    draw.text((margin_left, height - 30), f"Start: {start_date}", fill=(120, 120, 120), font=subtitle_font)
+    draw.text((width - margin_right - 180, height - 30), f"Latest: {end_date}", fill=(120, 120, 120), font=subtitle_font)
+    
+    # Save to buffer
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+
+class TimelineGameSelect(discord.ui.View):
+    """Dropdown menu and buttons for timeline controls."""
+    
+    def __init__(self, guild_name: str, current_game: str = 'GENERAL', show_delta: bool = False):
+        super().__init__(timeout=180)
+        self.guild_name = guild_name
+        self.current_game = current_game
+        self.show_delta = show_delta
+        
+        # Get available games for this guild
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT game FROM guild_historical 
+                WHERE name = ? AND lifetime_exp > 0
+                ORDER BY game
+            ''', (guild_name,))
+            games = [row['game'] for row in cursor.fetchall()]
+        
+        # Create select menu
+        options = []
+        for game in games:
+            display_name = game.replace('_', ' ').title()
+            options.append(discord.SelectOption(
+                label=display_name,
+                value=game,
+                default=(game == current_game)
+            ))
+        
+        # Add select menu to view
+        select = discord.ui.Select(
+            placeholder="Choose a game type...",
+            options=options[:25],  # Discord limit
+            custom_id="game_select"
+        )
+        select.callback = self.game_callback
+        self.add_item(select)
+        
+        # Add toggle button for absolute/delta view
+        toggle_button = discord.ui.Button(
+            label="Show Delta" if not show_delta else "Show Absolute",
+            style=discord.ButtonStyle.primary if not show_delta else discord.ButtonStyle.secondary,
+            custom_id="toggle_delta"
+        )
+        toggle_button.callback = self.toggle_callback
+        self.add_item(toggle_button)
+    
+    async def game_callback(self, interaction: discord.Interaction):
+        """Handle game selection."""
+        game = interaction.data['values'][0]
+        self.current_game = game
+        
+        await interaction.response.defer()
+        
+        try:
+            # Generate new graph
+            graph_buf = generate_timeline_graph(self.guild_name, game, show_delta=self.show_delta)
+            file = discord.File(graph_buf, filename=f"timeline_{self.guild_name}_{game}.png")
+            
+            # Create new view with updated state
+            new_view = TimelineGameSelect(self.guild_name, current_game=game, show_delta=self.show_delta)
+            
+            # Update message
+            game_display = game.replace('_', ' ').title()
+            mode_text = " (Daily Change)" if self.show_delta else ""
+            await interaction.followup.edit_message(
+                interaction.message.id,
+                content=f"**Timeline for {self.guild_name} - {game_display}{mode_text}**",
+                attachments=[file],
+                view=new_view
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Error generating timeline: {str(e)}", ephemeral=True)
+    
+    async def toggle_callback(self, interaction: discord.Interaction):
+        """Handle delta/absolute toggle."""
+        self.show_delta = not self.show_delta
+        
+        await interaction.response.defer()
+        
+        try:
+            # Generate new graph with toggled mode
+            graph_buf = generate_timeline_graph(self.guild_name, self.current_game, show_delta=self.show_delta)
+            file = discord.File(graph_buf, filename=f"timeline_{self.guild_name}_{self.current_game}.png")
+            
+            # Create new view with updated state
+            new_view = TimelineGameSelect(self.guild_name, current_game=self.current_game, show_delta=self.show_delta)
+            
+            # Update message
+            game_display = self.current_game.replace('_', ' ').title()
+            mode_text = " (Daily Change)" if self.show_delta else ""
+            await interaction.followup.edit_message(
+                interaction.message.id,
+                content=f"**Timeline for {self.guild_name} - {game_display}{mode_text}**",
+                attachments=[file],
+                view=new_view
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Error toggling view: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="timeline", description="View guild experience timeline graph")
+@discord.app_commands.describe(guild="Guild name")
+@discord.app_commands.autocomplete(guild=guild_autocomplete)
+async def timeline(interaction: discord.Interaction, guild: str):
+    """Display a timeline graph of guild experience over time."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+    
+    try:
+        # Validate guild has historical data
+        history = get_guild_historical_data(guild, game='GENERAL')
+        if not history:
+            await interaction.followup.send(f"❌ No historical data found for guild '{guild}'.")
+            return
+        
+        # Generate initial graph (GENERAL by default)
+        graph_buf = generate_timeline_graph(guild, 'GENERAL')
+        file = discord.File(graph_buf, filename=f"timeline_{guild}_GENERAL.png")
+        
+        # Create view with game selector
+        view = TimelineGameSelect(guild)
+        
+        await interaction.followup.send(
+            content=f"**Timeline for {guild} - General**",
+            file=file,
+            view=view
+        )
+    
+    except Exception as e:
+        print(f"[ERROR] Timeline command failed: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ Error generating timeline: {str(e)}")
 
 
 @bot.tree.command(name="api-stats", description="View Hypixel API usage statistics for the current 5-minute window")

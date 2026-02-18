@@ -283,6 +283,22 @@ def init_database(db_path: Optional[Path] = None):
         # Create index for tracked guilds
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tracked_guilds_name ON tracked_guilds(name)')
         
+        # Guild historical table - stores daily snapshots of lifetime guild exp values
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guild_historical (
+                name TEXT NOT NULL,
+                game TEXT NOT NULL,
+                lifetime_exp REAL NOT NULL,
+                timestamp INTEGER NOT NULL,
+                PRIMARY KEY (name, game, timestamp)
+            )
+        ''')
+        
+        # Create indexes for guild_historical
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_guild_historical_name ON guild_historical(name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_guild_historical_timestamp ON guild_historical(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_guild_historical_name_game ON guild_historical(name, game)')
+        
         conn.commit()
 
 
@@ -1533,6 +1549,9 @@ def get_hotbar_layouts(username: str, game: Optional[str] = None, db_path: Optio
 def add_tracked_guild(guild_name: str, guild_tag: Optional[str] = None, guild_hex: Optional[str] = None, db_path: Optional[Path] = None) -> bool:
     """Add a guild to the tracked guilds list (sets is_tracked=1 for automatic updates).
     
+    When a guild is newly tracked, this initializes ALL snapshots (session, daily, yesterday, 
+    weekly, monthly) to current lifetime values so deltas start fresh from this point forward.
+    
     Args:
         guild_name: Guild name
         guild_tag: Guild tag (e.g., "GOAT")
@@ -1556,11 +1575,20 @@ def add_tracked_guild(guild_name: str, guild_tag: Optional[str] = None, guild_he
                 WHERE name = ?
             ''', (guild_tag, guild_hex, guild_name))
             was_already_tracked = existing['is_tracked'] == 1
-            conn.commit()
-            if was_already_tracked:
-                print(f"[DB] Guild '{guild_name}' is already tracked")
+            
+            # If guild wasn't tracked before, initialize ALL snapshots
+            if not was_already_tracked:
+                cursor.execute('''
+                    UPDATE gexp
+                    SET session = lifetime, daily = lifetime, yesterday = lifetime, 
+                        weekly = lifetime, monthly = lifetime
+                    WHERE name = ?
+                ''', (guild_name,))
+                print(f"[DB] Enabled tracking for guild '{guild_name}' and initialized all snapshots")
             else:
-                print(f"[DB] Enabled tracking for guild '{guild_name}'")
+                print(f"[DB] Guild '{guild_name}' is already tracked")
+            
+            conn.commit()
             return not was_already_tracked
         else:
             # New guild - insert with is_tracked=1
@@ -1568,8 +1596,17 @@ def add_tracked_guild(guild_name: str, guild_tag: Optional[str] = None, guild_he
                 INSERT INTO tracked_guilds (name, added_at, is_tracked, guild_tag, guild_hex)
                 VALUES (?, strftime('%s', 'now'), 1, ?, ?)
             ''', (guild_name, guild_tag, guild_hex))
+            
+            # Initialize ALL snapshots for any existing gexp entries
+            cursor.execute('''
+                UPDATE gexp
+                SET session = lifetime, daily = lifetime, yesterday = lifetime,
+                    weekly = lifetime, monthly = lifetime
+                WHERE name = ?
+            ''', (guild_name,))
+            
             conn.commit()
-            print(f"[DB] Added and tracked guild '{guild_name}'")
+            print(f"[DB] Added and tracked guild '{guild_name}' (initialized all snapshots if gexp exists)")
             return True
 
 
@@ -1890,6 +1927,130 @@ def get_all_guilds() -> List[str]:
         cursor = conn.cursor()
         cursor.execute('SELECT DISTINCT name FROM gexp ORDER BY name')
         return [row['name'] for row in cursor.fetchall()]
+
+
+def log_guild_historical_snapshot(guild_names: Optional[List[str]] = None, 
+                                   timestamp: Optional[int] = None,
+                                   db_path: Optional[Path] = None) -> Dict[str, bool]:
+    """Log lifetime guild experience values to guild_historical table.
+    
+    This function captures a snapshot of current lifetime values for all games
+    for each tracked guild. It's designed to be called daily to build a timeline
+    of guild experience over time.
+    
+    Args:
+        guild_names: Optional list of specific guild names to log. If None, logs all tracked guilds.
+        timestamp: Optional Unix timestamp for the snapshot. If None, uses current time.
+        db_path: Optional custom path to database file
+        
+    Returns:
+        Dict mapping guild name to success status
+    """
+    if timestamp is None:
+        timestamp = int(time.time())
+    
+    results = {}
+    
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Get list of guilds to log
+        if guild_names is None:
+            # Get all tracked guilds
+            cursor.execute('SELECT name FROM tracked_guilds WHERE is_tracked = 1')
+            guild_names = [row['name'] for row in cursor.fetchall()]
+        
+        print(f"[DB] Logging historical snapshots for {len(guild_names)} guild(s) at timestamp {timestamp}")
+        
+        for guild_name in guild_names:
+            try:
+                # Get all current lifetime values for this guild
+                cursor.execute('''
+                    SELECT game, lifetime
+                    FROM gexp
+                    WHERE name = ?
+                ''', (guild_name,))
+                
+                game_data = cursor.fetchall()
+                
+                if not game_data:
+                    print(f"[DB] No guild data found for '{guild_name}', skipping historical log")
+                    results[guild_name] = False
+                    continue
+                
+                # Insert historical records for each game
+                for row in game_data:
+                    game = row['game']
+                    lifetime_exp = row['lifetime']
+                    
+                    # Insert or replace to avoid duplicates for same timestamp
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO guild_historical (name, game, lifetime_exp, timestamp)
+                        VALUES (?, ?, ?, ?)
+                    ''', (guild_name, game, lifetime_exp, timestamp))
+                
+                results[guild_name] = True
+                print(f"[DB] Logged {len(game_data)} game record(s) for guild '{guild_name}'")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to log historical data for guild '{guild_name}': {e}")
+                results[guild_name] = False
+        
+        conn.commit()
+    
+    return results
+
+
+def get_guild_historical_data(guild_name: str, 
+                               game: Optional[str] = None,
+                               start_timestamp: Optional[int] = None,
+                               end_timestamp: Optional[int] = None,
+                               db_path: Optional[Path] = None) -> List[Dict]:
+    """Retrieve historical guild experience data for graphing and analysis.
+    
+    Args:
+        guild_name: Guild name
+        game: Optional game type filter (e.g., 'GENERAL', 'WOOL_WARS'). If None, returns all games.
+        start_timestamp: Optional Unix timestamp for range start. If None, returns all history.
+        end_timestamp: Optional Unix timestamp for range end. If None, returns up to present.
+        db_path: Optional custom path to database file
+        
+    Returns:
+        List of dicts with keys: game, lifetime_exp, timestamp
+        Sorted by timestamp ascending
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Build query with optional filters
+        query = 'SELECT game, lifetime_exp, timestamp FROM guild_historical WHERE name = ?'
+        params = [guild_name]
+        
+        if game is not None:
+            query += ' AND game = ?'
+            params.append(game)
+        
+        if start_timestamp is not None:
+            query += ' AND timestamp >= ?'
+            params.append(start_timestamp)
+        
+        if end_timestamp is not None:
+            query += ' AND timestamp <= ?'
+            params.append(end_timestamp)
+        
+        query += ' ORDER BY timestamp ASC'
+        
+        cursor.execute(query, params)
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'game': row['game'],
+                'lifetime_exp': row['lifetime_exp'],
+                'timestamp': row['timestamp']
+            })
+        
+        return results
 
 
 def guild_exists(guild_name: str, db_path: Optional[Path] = None) -> bool:
